@@ -55,6 +55,7 @@ import org.apache.rocketmq.store.ha.HAService;
 import org.apache.rocketmq.store.logfile.MappedFile;
 
 /**
+ * 其实就是消息文件的抽象（它代表着物理消息文件）
  * Store all metadata downtime for recovery, data protection reliability
  */
 public class CommitLog implements Swappable {

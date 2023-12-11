@@ -32,6 +32,9 @@ import org.apache.rocketmq.store.SelectMappedBufferResult;
 import org.apache.rocketmq.store.TransientStorePool;
 import org.apache.rocketmq.store.config.FlushDiskType;
 
+/**
+ * 这个就是CommitLog文件在内存中的映射；
+ */
 public interface MappedFile {
     /**
      * Returns the file name of the {@code MappedFile}.

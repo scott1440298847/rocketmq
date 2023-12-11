@@ -1,3 +1,7 @@
+> rocketmq最大的问题就是没有写代码注释，基本上没有，
+> 所以它在国际上没有很流行；
+> 那我就自己写一个相关的注释吧；
+
 ## Apache RocketMQ
 
 [![Build Status][maven-build-image]][maven-build-url]
