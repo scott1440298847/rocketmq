@@ -17,24 +17,43 @@
 package org.apache.rocketmq.proxy.service.route;
 
 import com.google.common.base.MoreObjects;
+import java.util.List;
+import org.apache.commons.collections.CollectionUtils;
 import org.apache.rocketmq.remoting.protocol.route.TopicRouteData;
 
 public class MessageQueueView {
-    public static final MessageQueueView WRAPPED_EMPTY_QUEUE = new MessageQueueView("", new TopicRouteData());
+    public static final MessageQueueView WRAPPED_EMPTY_QUEUE = new MessageQueueView("", new TopicRouteData(), null);
 
     private final MessageQueueSelector readSelector;
     private final MessageQueueSelector writeSelector;
     private final TopicRouteWrapper topicRouteWrapper;
 
-    public MessageQueueView(String topic, TopicRouteData topicRouteData) {
+
+    public MessageQueueView(String topic, TopicRouteData topicRouteData, List<MessageQueuePenalizer<AddressableMessageQueue>> penalizer) {
+        this(topic, topicRouteData, penalizer, null);
+    }
+
+    public MessageQueueView(String topic, TopicRouteData topicRouteData, List<MessageQueuePenalizer<AddressableMessageQueue>> penalizer,
+        MessageQueuePriorityProvider<AddressableMessageQueue> priorityProvider) {
         this.topicRouteWrapper = new TopicRouteWrapper(topicRouteData, topic);
 
-        this.readSelector = new MessageQueueSelector(topicRouteWrapper, true);
-        this.writeSelector = new MessageQueueSelector(topicRouteWrapper, false);
+        this.readSelector = new MessageQueueSelector(topicRouteWrapper, true, priorityProvider);
+        this.writeSelector = new MessageQueueSelector(topicRouteWrapper, false, priorityProvider);
+
+        if (CollectionUtils.isNotEmpty(penalizer)) {
+            for (MessageQueuePenalizer<AddressableMessageQueue> p : penalizer) {
+                this.readSelector.addPenalizer(p);
+                this.writeSelector.addPenalizer(p);
+            }
+        }
     }
 
     public TopicRouteData getTopicRouteData() {
         return topicRouteWrapper.getTopicRouteData();
+    }
+
+    public TopicRouteWrapper getTopicRouteWrapper() {
+        return topicRouteWrapper;
     }
 
     public String getTopicName() {

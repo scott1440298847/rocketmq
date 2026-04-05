@@ -54,11 +54,35 @@ public class MappedFileQueue implements Swappable {
 
     protected volatile long storeTimestamp = 0;
 
+    protected RunningFlags runningFlags;
+
+    /**
+     * Configuration flag to use RandomAccessFile instead of MappedByteBuffer for writing
+     */
+    protected boolean writeWithoutMmap = false;
+
     public MappedFileQueue(final String storePath, int mappedFileSize,
         AllocateMappedFileService allocateMappedFileService) {
+        this(storePath, mappedFileSize, allocateMappedFileService, null, false);
+    }
+
+    public MappedFileQueue(final String storePath, int mappedFileSize,
+        AllocateMappedFileService allocateMappedFileService, RunningFlags runningFlags) {
+        this(storePath, mappedFileSize, allocateMappedFileService, runningFlags, false);
+    }
+
+    public MappedFileQueue(final String storePath, int mappedFileSize,
+        AllocateMappedFileService allocateMappedFileService, boolean writeWithoutMmap) {
+        this(storePath, mappedFileSize, allocateMappedFileService, null, writeWithoutMmap);
+    }
+
+    public MappedFileQueue(final String storePath, int mappedFileSize,
+        AllocateMappedFileService allocateMappedFileService, RunningFlags runningFlags, boolean writeWithoutMmap) {
         this.storePath = storePath;
         this.mappedFileSize = mappedFileSize;
         this.allocateMappedFileService = allocateMappedFileService;
+        this.runningFlags = runningFlags;
+        this.writeWithoutMmap = writeWithoutMmap;
     }
 
     public void checkSelf() {
@@ -247,8 +271,15 @@ public class MappedFileQueue implements Swappable {
         // ascending order
         files.sort(Comparator.comparing(File::getName));
 
-        for (File file : files) {
+        for (int i = 0; i < files.size(); i++) {
+            File file = files.get(i);
             if (file.isDirectory()) {
+                continue;
+            }
+
+            if (file.length() == 0 && i == files.size() - 1) {
+                boolean ok = file.delete();
+                log.warn("{} size is 0, auto delete. is_ok: {}", file, ok);
                 continue;
             }
 
@@ -259,7 +290,7 @@ public class MappedFileQueue implements Swappable {
             }
 
             try {
-                MappedFile mappedFile = new DefaultMappedFile(file.getPath(), mappedFileSize);
+                MappedFile mappedFile = new DefaultMappedFile(file.getPath(), mappedFileSize, runningFlags, writeWithoutMmap);
 
                 mappedFile.setWrotePosition(this.mappedFileSize);
                 mappedFile.setFlushedPosition(this.mappedFileSize);
@@ -278,7 +309,7 @@ public class MappedFileQueue implements Swappable {
         if (this.mappedFiles.isEmpty())
             return 0;
 
-        long committed = this.flushedWhere;
+        long committed = this.getFlushedWhere();
         if (committed != 0) {
             MappedFile mappedFile = this.getLastMappedFile(0, false);
             if (mappedFile != null) {
@@ -349,7 +380,7 @@ public class MappedFileQueue implements Swappable {
                     nextNextFilePath, this.mappedFileSize);
         } else {
             try {
-                mappedFile = new DefaultMappedFile(nextFilePath, this.mappedFileSize);
+                mappedFile = new DefaultMappedFile(nextFilePath, this.mappedFileSize, runningFlags, this.writeWithoutMmap);
             } catch (IOException e) {
                 log.error("create mappedFile exception", e);
             }
@@ -370,8 +401,19 @@ public class MappedFileQueue implements Swappable {
     }
 
     public MappedFile getLastMappedFile() {
-        MappedFile[] mappedFiles = this.mappedFiles.toArray(new MappedFile[0]);
-        return mappedFiles.length == 0 ? null : mappedFiles[mappedFiles.length - 1];
+        MappedFile mappedFileLast = null;
+        while (!this.mappedFiles.isEmpty()) {
+            try {
+                mappedFileLast = this.mappedFiles.get(this.mappedFiles.size() - 1);
+                break;
+            } catch (IndexOutOfBoundsException e) {
+                //continue;
+            } catch (Exception e) {
+                log.error("getLastMappedFile has exception.", e);
+                break;
+            }
+        }
+        return mappedFileLast;
     }
 
     public boolean resetOffset(long offset) {
@@ -388,6 +430,7 @@ public class MappedFileQueue implements Swappable {
         }
 
         ListIterator<MappedFile> iterator = this.mappedFiles.listIterator(mappedFiles.size());
+        List<MappedFile> toRemoves = new ArrayList<>();
 
         while (iterator.hasPrevious()) {
             mappedFileLast = iterator.previous();
@@ -398,9 +441,14 @@ public class MappedFileQueue implements Swappable {
                 mappedFileLast.setCommittedPosition(where);
                 break;
             } else {
-                iterator.remove();
+                toRemoves.add(mappedFileLast);
             }
         }
+
+        if (!toRemoves.isEmpty()) {
+            this.mappedFiles.removeAll(toRemoves);
+        }
+
         return true;
     }
 
@@ -435,11 +483,11 @@ public class MappedFileQueue implements Swappable {
     }
 
     public long remainHowManyDataToCommit() {
-        return getMaxWrotePosition() - committedWhere;
+        return getMaxWrotePosition() - getCommittedWhere();
     }
 
     public long remainHowManyDataToFlush() {
-        return getMaxOffset() - flushedWhere;
+        return getMaxOffset() - this.getFlushedWhere();
     }
 
     public void deleteLastMappedFile() {
@@ -609,15 +657,15 @@ public class MappedFileQueue implements Swappable {
 
     public boolean flush(final int flushLeastPages) {
         boolean result = true;
-        MappedFile mappedFile = this.findMappedFileByOffset(this.flushedWhere, this.flushedWhere == 0);
+        MappedFile mappedFile = this.findMappedFileByOffset(this.getFlushedWhere(), this.getFlushedWhere() == 0);
         if (mappedFile != null) {
             long tmpTimeStamp = mappedFile.getStoreTimestamp();
             int offset = mappedFile.flush(flushLeastPages);
             long where = mappedFile.getFileFromOffset() + offset;
-            result = where == this.flushedWhere;
-            this.flushedWhere = where;
+            result = where == this.getFlushedWhere();
+            this.setFlushedWhere(where);
             if (0 == flushLeastPages) {
-                this.storeTimestamp = tmpTimeStamp;
+                this.setStoreTimestamp(tmpTimeStamp);
             }
         }
 
@@ -626,12 +674,12 @@ public class MappedFileQueue implements Swappable {
 
     public synchronized boolean commit(final int commitLeastPages) {
         boolean result = true;
-        MappedFile mappedFile = this.findMappedFileByOffset(this.committedWhere, this.committedWhere == 0);
+        MappedFile mappedFile = this.findMappedFileByOffset(this.getCommittedWhere(), this.getCommittedWhere() == 0);
         if (mappedFile != null) {
             int offset = mappedFile.commit(commitLeastPages);
             long where = mappedFile.getFileFromOffset() + offset;
-            result = where == this.committedWhere;
-            this.committedWhere = where;
+            result = where == this.getCommittedWhere();
+            this.setCommittedWhere(where);
         }
 
         return result;
@@ -751,12 +799,18 @@ public class MappedFileQueue implements Swappable {
         }
     }
 
+    public void cleanResourcesAll() {
+        for (MappedFile mf : this.mappedFiles) {
+            mf.cleanResources();
+        }
+    }
+
     public void destroy() {
         for (MappedFile mf : this.mappedFiles) {
             mf.destroy(1000 * 3);
         }
         this.mappedFiles.clear();
-        this.flushedWhere = 0;
+        this.setFlushedWhere(0);
 
         // delete parent directory
         File file = new File(storePath);
@@ -841,6 +895,10 @@ public class MappedFileQueue implements Swappable {
         return storeTimestamp;
     }
 
+    public void setStoreTimestamp(long storeTimestamp) {
+        this.storeTimestamp = storeTimestamp;
+    }
+
     public List<MappedFile> getMappedFiles() {
         return mappedFiles;
     }
@@ -885,5 +943,21 @@ public class MappedFileQueue implements Swappable {
         }
 
         return result;
+    }
+
+    public MappedFile getEarliestMappedFile() {
+        MappedFile mappedFile = null;
+        while (!this.mappedFiles.isEmpty()) {
+            try {
+                mappedFile = this.mappedFiles.get(0);
+                break;
+            } catch (IndexOutOfBoundsException e) {
+                //continue;
+            } catch (Exception e) {
+                log.error("getEarliestMappedFile error: {}", e.getMessage());
+                break;
+            }
+        }
+        return mappedFile;
     }
 }

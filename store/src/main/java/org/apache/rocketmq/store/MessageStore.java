@@ -19,35 +19,38 @@ package org.apache.rocketmq.store;
 import io.opentelemetry.api.common.AttributesBuilder;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.sdk.metrics.InstrumentSelector;
-import io.opentelemetry.sdk.metrics.View;
-
+import io.opentelemetry.sdk.metrics.ViewBuilder;
 import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
-
+import javax.annotation.Nonnull;
+import org.apache.rocketmq.common.BoundaryType;
 import org.apache.rocketmq.common.Pair;
 import org.apache.rocketmq.common.SystemClock;
-import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.common.message.MessageExt;
 import org.apache.rocketmq.common.message.MessageExtBatch;
 import org.apache.rocketmq.common.message.MessageExtBrokerInner;
 import org.apache.rocketmq.remoting.protocol.body.HARuntimeInfo;
 import org.apache.rocketmq.store.config.MessageStoreConfig;
+import org.apache.rocketmq.store.exception.ConsumeQueueException;
 import org.apache.rocketmq.store.ha.HAService;
 import org.apache.rocketmq.store.hook.PutMessageHook;
 import org.apache.rocketmq.store.hook.SendMessageBackHook;
 import org.apache.rocketmq.store.logfile.MappedFile;
 import org.apache.rocketmq.store.queue.ConsumeQueueInterface;
-import org.apache.rocketmq.store.queue.ConsumeQueueStore;
+import org.apache.rocketmq.store.queue.ConsumeQueueStoreInterface;
+import org.apache.rocketmq.store.rocksdb.MessageRocksDBStorage;
 import org.apache.rocketmq.store.stats.BrokerStatsManager;
 import org.apache.rocketmq.store.timer.TimerMessageStore;
+import org.apache.rocketmq.store.timer.rocksdb.TimerMessageRocksDBStore;
+import org.apache.rocketmq.store.transaction.TransMessageRocksDBStore;
 import org.apache.rocketmq.store.util.PerfCounter;
+import org.apache.rocketmq.store.metrics.StoreMetricsManager;
+import org.rocksdb.RocksDBException;
 
 /**
  * This class defines contracting interfaces to implement, allowing third-party vendor to use customized message store.
@@ -184,7 +187,7 @@ public interface MessageStore {
      * @param queueId Queue ID.
      * @return Maximum offset at present.
      */
-    long getMaxOffsetInQueue(final String topic, final int queueId);
+    long getMaxOffsetInQueue(final String topic, final int queueId) throws ConsumeQueueException;
 
     /**
      * Get maximum offset of the topic queue.
@@ -194,7 +197,7 @@ public interface MessageStore {
      * @param committed return the max offset in ConsumeQueue if true, or the max offset in CommitLog if false
      * @return Maximum offset at present.
      */
-    long getMaxOffsetInQueue(final String topic, final int queueId, final boolean committed);
+    long getMaxOffsetInQueue(final String topic, final int queueId, final boolean committed) throws ConsumeQueueException;
 
     /**
      * Get the minimum offset of the topic queue.
@@ -207,7 +210,15 @@ public interface MessageStore {
 
     TimerMessageStore getTimerMessageStore();
 
+    TimerMessageRocksDBStore getTimerMessageRocksDBStore();
+
+    TransMessageRocksDBStore getTransMessageRocksDBStore();
+
     void setTimerMessageStore(TimerMessageStore timerMessageStore);
+
+    void setTimerMessageRocksDBStore(TimerMessageRocksDBStore timerMessageRocksDBStore);
+
+    void setTransMessageRocksDBStore(TransMessageRocksDBStore transMessageRocksDBStore);
 
     /**
      * Get the offset of the message in the commit log, which is also known as physical offset.
@@ -228,6 +239,17 @@ public interface MessageStore {
      * @return physical offset which matches.
      */
     long getOffsetInQueueByTime(final String topic, final int queueId, final long timestamp);
+
+    /**
+     * Look up the physical offset of the message whose store timestamp is as specified with specific boundaryType.
+     *
+     * @param topic        Topic of the message.
+     * @param queueId      Queue ID.
+     * @param timestamp    Timestamp to look up.
+     * @param boundaryType Lower or Upper
+     * @return physical offset which matches.
+     */
+    long getOffsetInQueueByTime(final String topic, final int queueId, final long timestamp, final BoundaryType boundaryType);
 
     /**
      * Look up the message by given commit log offset.
@@ -399,6 +421,8 @@ public interface MessageStore {
     QueryMessageResult queryMessage(final String topic, final String key, final int maxNum, final long begin,
         final long end);
 
+    QueryMessageResult queryMessage(final String topic, final String key, final int maxNum, final long begin, final long end, final String indexType, final String lastKey);
+
     /**
      * Asynchronous query messages by given key.
      * @see #queryMessage(String, String, int, long, long) queryMessage
@@ -411,6 +435,8 @@ public interface MessageStore {
      */
     CompletableFuture<QueryMessageResult> queryMessageAsync(final String topic, final String key, final int maxNum,
         final long begin, final long end);
+
+    CompletableFuture<QueryMessageResult> queryMessageAsync(final String topic, final String key, final int maxNum, final long begin, final long end, final String indexType, final String lastKey);
 
     /**
      * Update HA master address.
@@ -502,6 +528,20 @@ public interface MessageStore {
     long dispatchBehindBytes();
 
     /**
+     * Get number of the bytes that have been stored in commit log and not yet flushed to disk.
+     *
+     * @return number of the bytes to flush.
+     */
+    long flushBehindBytes();
+
+    /**
+     * Get number of the milliseconds that have been stored in commit log and not yet dispatched to consume queue.
+     *
+     * @return number of the milliseconds to dispatch.
+     */
+    long dispatchBehindMilliseconds();
+
+    /**
      * Flush the message store to persist all data.
      *
      * @return maximum offset flushed to persistent storage device.
@@ -514,14 +554,6 @@ public interface MessageStore {
      * @return flushed offset
      */
     long getFlushedWhere();
-
-    /**
-     * Reset written offset.
-     *
-     * @param phyOffset new offset.
-     * @return true if success; false otherwise.
-     */
-    boolean resetWriteOffset(long phyOffset);
 
     /**
      * Get confirm offset.
@@ -538,7 +570,7 @@ public interface MessageStore {
     void setConfirmOffset(long phyOffset);
 
     /**
-     * Check if the operation system page cache is busy or not.
+     * Check if the operating system page cache is busy or not.
      *
      * @return true if the OS page cache is busy; false otherwise.
      */
@@ -613,9 +645,10 @@ public interface MessageStore {
      * @param commitLogFile   commit log file
      * @param isRecover       is from recover process
      * @param isFileEnd       if the dispatch request represents 'file end'
+     * @throws RocksDBException      only in rocksdb mode
      */
     void onCommitLogDispatch(DispatchRequest dispatchRequest, boolean doDispatch, MappedFile commitLogFile,
-        boolean isRecover, boolean isFileEnd);
+        boolean isRecover, boolean isFileEnd) throws RocksDBException;
 
     /**
      * Get the message store config
@@ -684,13 +717,9 @@ public interface MessageStore {
      * Truncate dirty logic files
      *
      * @param phyOffset physical offset
+     * @throws RocksDBException only in rocksdb mode
      */
-    void truncateDirtyLogicFiles(long phyOffset);
-
-    /**
-     * Destroy logics files
-     */
-    void destroyLogics();
+    void truncateDirtyLogicFiles(long phyOffset) throws RocksDBException;
 
     /**
      * Unlock mappedFile
@@ -711,7 +740,8 @@ public interface MessageStore {
      *
      * @return the queue store
      */
-    ConsumeQueueStore getQueueStore();
+    @Nonnull
+    ConsumeQueueStoreInterface getQueueStore();
 
     /**
      * If 'sync disk flush' is configured in this message store
@@ -728,28 +758,21 @@ public interface MessageStore {
     boolean isSyncMaster();
 
     /**
-     * Assign an queue offset and increase it. If there is a race condition, you need to lock/unlock this method
+     * Assign a message to queue offset. If there is a race condition, you need to lock/unlock this method
      * yourself.
+     *
+     * @param msg        message
+     * @throws RocksDBException
+     */
+    void assignOffset(MessageExtBrokerInner msg) throws RocksDBException;
+
+    /**
+     * Increase queue offset in memory table. If there is a race condition, you need to lock/unlock this method
      *
      * @param msg        message
      * @param messageNum message num
      */
-    void assignOffset(MessageExtBrokerInner msg, short messageNum);
-
-    /**
-     * get all topic config
-     *
-     * @return all topic config info
-     */
-    Map<String, TopicConfig> getTopicConfigs();
-
-    /**
-     * get topic config
-     *
-     * @param topic topic name
-     * @return topic config info
-     */
-    Optional<TopicConfig> getTopicConfig(String topic);
+    void increaseOffset(MessageExtBrokerInner msg, short messageNum);
 
     /**
      * Get master broker message store in process in broker container
@@ -836,14 +859,15 @@ public interface MessageStore {
      *
      * @param offsetToTruncate offset to truncate
      * @return true if truncate succeed, false otherwise
+     * @throws RocksDBException only in rocksdb mode
      */
-    boolean truncateFiles(long offsetToTruncate);
+    boolean truncateFiles(long offsetToTruncate) throws RocksDBException;
 
     /**
-     * Check if the offset is align with one message.
+     * Check if the offset is aligned with one message.
      *
      * @param offset offset to check
-     * @return true if align, false otherwise
+     * @return true if aligned, false otherwise
      */
     boolean isOffsetAligned(long offset);
 
@@ -907,6 +931,13 @@ public interface MessageStore {
     long getStateMachineVersion();
 
     /**
+     * Get store metrics manager
+     *
+     * @return store metrics manager
+     */
+    StoreMetricsManager getStoreMetricsManager();
+
+    /**
      * Check message and return size
      *
      * @param byteBuffer
@@ -963,7 +994,7 @@ public interface MessageStore {
      *
      * @return List of metrics selector and view pair
      */
-    List<Pair<InstrumentSelector, View>> getMetricsView();
+    List<Pair<InstrumentSelector, ViewBuilder>> getMetricsView();
 
     /**
      * Init store metrics
@@ -972,4 +1003,18 @@ public interface MessageStore {
      * @param attributesBuilderSupplier metrics attributes builder
      */
     void initMetrics(Meter meter, Supplier<AttributesBuilder> attributesBuilderSupplier);
+
+    /**
+     * Recover topic queue table
+     */
+    void recoverTopicQueueTable();
+
+    /**
+     * notify message arrive if necessary
+     */
+    void notifyMessageArriveIfNecessary(DispatchRequest dispatchRequest);
+
+    MessageStoreStateMachine getStateMachine();
+
+    MessageRocksDBStorage getMessageRocksDBStorage();
 }

@@ -18,8 +18,10 @@ package org.apache.rocketmq.common;
 
 import java.util.concurrent.TimeUnit;
 import org.apache.rocketmq.common.annotation.ImportantField;
+import org.apache.rocketmq.common.config.ConfigManagerVersion;
 import org.apache.rocketmq.common.constant.PermName;
 import org.apache.rocketmq.common.message.MessageRequestMode;
+import org.apache.rocketmq.common.metrics.MetricsExporterType;
 import org.apache.rocketmq.common.topic.TopicValidator;
 import org.apache.rocketmq.common.utils.NetworkUtil;
 
@@ -27,7 +29,7 @@ public class BrokerConfig extends BrokerIdentity {
 
     private String brokerConfigPath = null;
 
-    private String rocketmqHome = System.getProperty(MixAll.ROCKETMQ_HOME_PROPERTY, System.getenv(MixAll.ROCKETMQ_HOME_ENV));
+    private String rocketmqHome = MixAll.ROCKETMQ_HOME_DIR;
     @ImportantField
     private String namesrvAddr = System.getProperty(MixAll.NAMESRV_ADDR_PROPERTY, System.getenv(MixAll.NAMESRV_ADDR_ENV));
 
@@ -68,7 +70,7 @@ public class BrokerConfig extends BrokerIdentity {
     private int putMessageFutureThreadPoolNums = Math.min(PROCESSOR_NUMBER, 4);
     private int pullMessageThreadPoolNums = 16 + PROCESSOR_NUMBER * 2;
     private int litePullMessageThreadPoolNums = 16 + PROCESSOR_NUMBER * 2;
-    private int ackMessageThreadPoolNums = 3;
+    private int ackMessageThreadPoolNums = 16;
     private int processReplyMessageThreadPoolNums = 16 + PROCESSOR_NUMBER * 2;
     private int queryMessageThreadPoolNums = 8 + PROCESSOR_NUMBER;
 
@@ -112,8 +114,6 @@ public class BrokerConfig extends BrokerIdentity {
     private int adminBrokerThreadPoolQueueCapacity = 10000;
     private int loadBalanceThreadPoolQueueCapacity = 100000;
 
-    private int filterServerNums = 0;
-
     private boolean longPollingEnable = true;
 
     private long shortPollingTimeMills = 1000;
@@ -128,6 +128,8 @@ public class BrokerConfig extends BrokerIdentity {
 
     private boolean accountStatsEnable = true;
     private boolean accountStatsPrintZeroValues = true;
+
+    private int maxStatsIdleTimeInMinutes = -1;
 
     private boolean transferMsgByHeap = true;
 
@@ -148,7 +150,7 @@ public class BrokerConfig extends BrokerIdentity {
     private long waitTimeMillsInHeartbeatQueue = 31 * 1000;
     private long waitTimeMillsInTransactionQueue = 3 * 1000;
     private long waitTimeMillsInAckQueue = 3000;
-
+    private long waitTimeMillsInAdminBrokerQueue = 5 * 1000;
     private long startAcceptSendRequestTimeStamp = 0L;
 
     private boolean traceOn = true;
@@ -186,6 +188,11 @@ public class BrokerConfig extends BrokerIdentity {
     private int registerNameServerPeriod = 1000 * 30;
 
     /**
+     * This configurable item defines interval of update name server address. Default: 120 * 1000 milliseconds
+     */
+    private int updateNameServerAddrPeriod = 1000 * 120;
+
+    /**
      * the interval to send heartbeat to name server for liveness detection.
      */
     private int brokerHeartbeatInterval = 1000;
@@ -206,6 +213,8 @@ public class BrokerConfig extends BrokerIdentity {
 
     private int popPollingSize = 1024;
     private int popPollingMapSize = 100000;
+
+    private int popPollingMapExpireTimeSeconds = 60 * 10;
     // 20w cost 200M heap memory.
     private long maxPopPollingSize = 100000;
     private int reviveQueueNum = 8;
@@ -220,9 +229,34 @@ public class BrokerConfig extends BrokerIdentity {
     private int popCkStayBufferTimeOut = 3 * 1000;
     private int popCkMaxBufferSize = 200000;
     private int popCkOffsetMaxQueueSize = 20000;
+    private boolean enablePopBatchAck = false;
+    // set the interval to the maxFilterMessageSize in MessageStoreConfig divided by the cq unit size
+    private long popLongPollingForceNotifyInterval = 800;
+    private boolean enableNotifyBeforePopCalculateLag = true;
     private boolean enableNotifyAfterPopOrderLockRelease = true;
-
+    private boolean initPopOffsetByCheckMsgInMem = true;
+    // read message from pop retry topic v1, for the compatibility, will be removed in the future version
+    private boolean retrieveMessageFromPopRetryTopicV1 = true;
+    private boolean enableRetryTopicV2 = false;
+    private int popFromRetryProbability = 20;
+    // pop retry probability for priority mode
+    private int popFromRetryProbabilityForPriority = 0;
+    // 0 as the lowest priority if true
+    private boolean priorityOrderAsc = true;
+    private boolean popConsumerFSServiceInit = true;
+    private boolean popConsumerKVServiceLog = false;
+    private boolean popConsumerKVServiceInit = false;
+    private boolean popConsumerKVServiceEnable = false;
+    private int popReviveMaxReturnSizePerRead = 16 * 1024;
+    private int popReviveConcurrency = 32;
+    private int popReviveMaxAttemptTimes = 16;
+    private boolean popReviveSkipIfGroupAbsent = true;
+    // each message queue will have a corresponding retry queue
+    private boolean useSeparateRetryQueue = false;
     private boolean realTimeNotifyConsumerChange = true;
+
+    private boolean useMessageFilterForNotification = true;
+    private int maxMessageFilterNumForNotification = 64;
 
     private boolean litePullMessageEnable = true;
 
@@ -264,6 +298,14 @@ public class BrokerConfig extends BrokerIdentity {
     @ImportantField
     private long transactionCheckInterval = 30 * 1000;
 
+    private long transactionMetricFlushInterval = 10 * 1000;
+
+    private int transactionCheckRocksdbCoreThreads = 2;
+
+    private int transactionCheckRocksdbMaxThreads = 5;
+
+    private int transactionCheckRocksdbQueueCapacity = 2000;
+
     /**
      * transaction batch op message
      */
@@ -281,7 +323,7 @@ public class BrokerConfig extends BrokerIdentity {
 
     private boolean enableDetailStat = true;
 
-    private boolean autoDeleteUnusedStats = false;
+    private boolean autoDeleteUnusedStats = true;
 
     /**
      * Whether to distinguish log paths when multiple brokers are deployed on the same machine
@@ -303,7 +345,7 @@ public class BrokerConfig extends BrokerIdentity {
 
     private boolean asyncSendEnable = true;
 
-    private boolean useServerSideResetOffset = false;
+    private boolean useServerSideResetOffset = true;
 
     private long consumerOffsetUpdateVersionStep = 500;
 
@@ -346,42 +388,9 @@ public class BrokerConfig extends BrokerIdentity {
 
     private boolean useStaticSubscription = false;
 
-    public enum MetricsExporterType {
-        DISABLE(0),
-        OTLP_GRPC(1),
-        PROM(2),
-        LOG(3);
-
-        private final int value;
-
-        MetricsExporterType(int value) {
-            this.value = value;
-        }
-
-        public int getValue() {
-            return value;
-        }
-
-        public static MetricsExporterType valueOf(int value) {
-            switch (value) {
-                case 1:
-                    return OTLP_GRPC;
-                case 2:
-                    return PROM;
-                case 3:
-                    return LOG;
-                default:
-                    return DISABLE;
-            }
-        }
-
-        public boolean isEnable() {
-            return this.value > 0;
-        }
-    }
-
     private MetricsExporterType metricsExporterType = MetricsExporterType.DISABLE;
 
+    private int metricsOtelCardinalityLimit = 50 * 1000;
     private String metricsGrpcExporterTarget = "";
     private String metricsGrpcExporterHeader = "";
     private long metricGrpcExporterTimeOutInMills = 3 * 1000;
@@ -394,7 +403,18 @@ public class BrokerConfig extends BrokerIdentity {
     // Label pairs in CSV. Each label follows pattern of Key:Value. eg: instance_id:xxx,uid:xxx
     private String metricsLabel = "";
 
+    private int metricsExportBatchMaxDataPoints = 1000;
+
     private boolean metricsInDelta = false;
+
+    private boolean enableRemotingMetrics = true;
+    private boolean enableMessageStoreMetrics = true;
+    private boolean enablePopMetrics = true;
+    private boolean enableConnectionMetrics = true;
+    private boolean enableTransactionMetrics = true;
+    private boolean enableStatsMetrics = true;
+    private boolean enableRequestMetrics = true;
+    private boolean enableLagAndDlqMetrics = true;
 
     private long channelExpiredTimeout = 1000 * 120;
     private long subscriptionExpiredTimeout = 1000 * 60 * 10;
@@ -404,6 +424,126 @@ public class BrokerConfig extends BrokerIdentity {
      */
     private boolean estimateAccumulation = true;
 
+    private boolean coldCtrStrategyEnable = false;
+    private boolean usePIDColdCtrStrategy = true;
+    private long cgColdReadThreshold = 3 * 1024 * 1024;
+    private long globalColdReadThreshold = 100 * 1024 * 1024;
+    
+    /**
+     * The interval to fetch namesrv addr, default value is 10 second
+     */
+    private long fetchNamesrvAddrInterval = 10 * 1000;
+
+    /**
+     * Pop response returns the actual retry topic rather than tampering with the original topic
+     */
+    private boolean popResponseReturnActualRetryTopic = false;
+
+    /**
+     * If both the deleteTopicWithBrokerRegistration flag in the NameServer configuration and this flag are set to true,
+     * it guarantees the ultimate consistency of data between the broker and the nameserver during topic deletion.
+     */
+    private boolean enableSingleTopicRegister = false;
+
+    private boolean enableMixedMessageType = false;
+
+    /**
+     * This flag and deleteTopicWithBrokerRegistration flag in the NameServer cannot be set to true at the same time,
+     * otherwise there will be a loss of routing
+     */
+    private boolean enableSplitRegistration = false;
+
+    private boolean enableSplitMetadata = true;
+    private int splitMetadataSize = 2000;
+
+    private long popInflightMessageThreshold = 10000;
+    private boolean enablePopMessageThreshold = false;
+
+    private boolean enableFastChannelEventProcess = false;
+    private boolean printChannelGroups = false;
+    private int printChannelGroupsMinNum = 5;
+
+    private int splitRegistrationSize = 800;
+
+    /**
+     * Config in this black list will be not allowed to update by command.
+     * Try to update this config black list by restart process.
+     * Try to update configures in black list by restart process.
+     */
+    private String configBlackList = "configBlackList;brokerConfigPath";
+
+    // if false, will still rewrite ck after max times 17
+    private boolean skipWhenCKRePutReachMaxTimes = false;
+
+    private boolean appendAckAsync = false;
+
+    private boolean appendCkAsync = false;
+
+    private boolean clearRetryTopicWhenDeleteTopic = true;
+
+    private boolean enableLmqStats = false;
+
+    /**
+     * V2 is recommended in cases where LMQ feature is extensively used.
+     */
+    private String configManagerVersion = ConfigManagerVersion.V1.getVersion();
+
+    /**
+     * Whether to use a single RocksDB instance with multiple column families for all configs
+     * instead of separate RocksDB instances for Topic, Group, and Offset configs
+     */
+    private boolean useSingleRocksDBForAllConfigs = false;
+
+    private boolean allowRecallWhenBrokerNotWriteable = true;
+
+    private boolean recallMessageEnable = false;
+
+    private boolean enableRegisterProducer = true;
+
+    private boolean enableCreateSysGroup = true;
+
+    private boolean enableLiteEventMode = true;
+
+    private long liteEventCheckInterval = 10 * 1000;
+
+    private long liteTtlCheckInterval = 120 * 1000;
+
+    private long minLiteTTl = 15 * 60 * 1000;
+
+    private long liteSubscriptionCheckInterval = TimeUnit.MINUTES.toMillis(2);
+
+    private long liteSubscriptionCheckTimeoutMills = TimeUnit.MINUTES.toMillis(3);
+
+    // make sense for rocksdb store
+    private boolean persistConsumerOffsetIncrementally = false;
+
+    private long maxLiteSubscriptionCount = 100000;
+
+    private boolean enableLitePopLog = false;
+
+    private int maxClientEventCount = 100;
+
+    private long liteEventFullDispatchDelayTime = 10 * 1000;
+
+    private long liteEventFullDispatchDelayTimeForWildcardGroup = 10 * 1000;
+
+    // lite metrics
+    // whether to collect storeTime in popLiteProcessor
+    private boolean liteLagLatencyCollectEnable = false;
+
+    private boolean liteLagLatencyMetricsEnable = false;
+
+    private boolean liteLagCountMetricsEnable = false;
+
+    private int liteLagLatencyTopK = 50;
+
+    public String getConfigBlackList() {
+        return configBlackList;
+    }
+
+    public void setConfigBlackList(String configBlackList) {
+        this.configBlackList = configBlackList;
+    }
 
     public long getMaxPopPollingSize() {
         return maxPopPollingSize;
@@ -451,6 +591,14 @@ public class BrokerConfig extends BrokerIdentity {
 
     public void setPopPollingMapSize(int popPollingMapSize) {
         this.popPollingMapSize = popPollingMapSize;
+    }
+
+    public int getPopPollingMapExpireTimeSeconds() {
+        return popPollingMapExpireTimeSeconds;
+    }
+
+    public void setPopPollingMapExpireTimeSeconds(int popPollingMapExpireTimeSeconds) {
+        this.popPollingMapExpireTimeSeconds = popPollingMapExpireTimeSeconds;
     }
 
     public long getReviveScanTime() {
@@ -501,6 +649,14 @@ public class BrokerConfig extends BrokerIdentity {
         this.popCkOffsetMaxQueueSize = popCkOffsetMaxQueueSize;
     }
 
+    public boolean isEnablePopBatchAck() {
+        return enablePopBatchAck;
+    }
+
+    public void setEnablePopBatchAck(boolean enablePopBatchAck) {
+        this.enablePopBatchAck = enablePopBatchAck;
+    }
+
     public boolean isEnableSkipLongAwaitingAck() {
         return enableSkipLongAwaitingAck;
     }
@@ -523,6 +679,78 @@ public class BrokerConfig extends BrokerIdentity {
 
     public void setEnablePopLog(boolean enablePopLog) {
         this.enablePopLog = enablePopLog;
+    }
+
+    public int getPopFromRetryProbability() {
+        return popFromRetryProbability;
+    }
+
+    public void setPopFromRetryProbability(int popFromRetryProbability) {
+        this.popFromRetryProbability = popFromRetryProbability;
+    }
+
+    public boolean isPopConsumerFSServiceInit() {
+        return popConsumerFSServiceInit;
+    }
+
+    public void setPopConsumerFSServiceInit(boolean popConsumerFSServiceInit) {
+        this.popConsumerFSServiceInit = popConsumerFSServiceInit;
+    }
+
+    public boolean isPopConsumerKVServiceLog() {
+        return popConsumerKVServiceLog;
+    }
+
+    public void setPopConsumerKVServiceLog(boolean popConsumerKVServiceLog) {
+        this.popConsumerKVServiceLog = popConsumerKVServiceLog;
+    }
+
+    public boolean isPopConsumerKVServiceInit() {
+        return popConsumerKVServiceInit;
+    }
+
+    public void setPopConsumerKVServiceInit(boolean popConsumerKVServiceInit) {
+        this.popConsumerKVServiceInit = popConsumerKVServiceInit;
+    }
+
+    public boolean isPopConsumerKVServiceEnable() {
+        return popConsumerKVServiceEnable;
+    }
+
+    public void setPopConsumerKVServiceEnable(boolean popConsumerKVServiceEnable) {
+        this.popConsumerKVServiceEnable = popConsumerKVServiceEnable;
+    }
+
+    public int getPopReviveConcurrency() {
+        return popReviveConcurrency;
+    }
+
+    public void setPopReviveConcurrency(int popReviveConcurrency) {
+        this.popReviveConcurrency = popReviveConcurrency;
+    }
+
+    public int getPopReviveMaxReturnSizePerRead() {
+        return popReviveMaxReturnSizePerRead;
+    }
+
+    public void setPopReviveMaxReturnSizePerRead(int popReviveMaxReturnSizePerRead) {
+        this.popReviveMaxReturnSizePerRead = popReviveMaxReturnSizePerRead;
+    }
+
+    public int getPopReviveMaxAttemptTimes() {
+        return popReviveMaxAttemptTimes;
+    }
+
+    public void setPopReviveMaxAttemptTimes(int popReviveMaxAttemptTimes) {
+        this.popReviveMaxAttemptTimes = popReviveMaxAttemptTimes;
+    }
+
+    public boolean isPopReviveSkipIfGroupAbsent() {
+        return popReviveSkipIfGroupAbsent;
+    }
+
+    public void setPopReviveSkipIfGroupAbsent(boolean popReviveSkipIfGroupAbsent) {
+        this.popReviveSkipIfGroupAbsent = popReviveSkipIfGroupAbsent;
     }
 
     public boolean isTraceOn() {
@@ -925,14 +1153,6 @@ public class BrokerConfig extends BrokerIdentity {
         this.brokerTopicEnable = brokerTopicEnable;
     }
 
-    public int getFilterServerNums() {
-        return filterServerNums;
-    }
-
-    public void setFilterServerNums(int filterServerNums) {
-        this.filterServerNums = filterServerNums;
-    }
-
     public boolean isLongPollingEnable() {
         return longPollingEnable;
     }
@@ -1145,6 +1365,14 @@ public class BrokerConfig extends BrokerIdentity {
         return msgTraceTopicName;
     }
 
+    public long getWaitTimeMillsInAdminBrokerQueue() {
+        return waitTimeMillsInAdminBrokerQueue;
+    }
+
+    public void setWaitTimeMillsInAdminBrokerQueue(long waitTimeMillsInAdminBrokerQueue) {
+        this.waitTimeMillsInAdminBrokerQueue = waitTimeMillsInAdminBrokerQueue;
+    }
+
     public void setMsgTraceTopicName(String msgTraceTopicName) {
         this.msgTraceTopicName = msgTraceTopicName;
     }
@@ -1155,10 +1383,6 @@ public class BrokerConfig extends BrokerIdentity {
 
     public void setTraceTopicEnable(boolean traceTopicEnable) {
         this.traceTopicEnable = traceTopicEnable;
-    }
-
-    public boolean isAclEnable() {
-        return aclEnable;
     }
 
     public void setAclEnable(boolean aclEnable) {
@@ -1269,12 +1493,52 @@ public class BrokerConfig extends BrokerIdentity {
         this.enableNetWorkFlowControl = enableNetWorkFlowControl;
     }
 
+    public long getPopLongPollingForceNotifyInterval() {
+        return popLongPollingForceNotifyInterval;
+    }
+
+    public void setPopLongPollingForceNotifyInterval(long popLongPollingForceNotifyInterval) {
+        this.popLongPollingForceNotifyInterval = popLongPollingForceNotifyInterval;
+    }
+
+    public boolean isEnableNotifyBeforePopCalculateLag() {
+        return enableNotifyBeforePopCalculateLag;
+    }
+
+    public void setEnableNotifyBeforePopCalculateLag(boolean enableNotifyBeforePopCalculateLag) {
+        this.enableNotifyBeforePopCalculateLag = enableNotifyBeforePopCalculateLag;
+    }
+
     public boolean isEnableNotifyAfterPopOrderLockRelease() {
         return enableNotifyAfterPopOrderLockRelease;
     }
 
     public void setEnableNotifyAfterPopOrderLockRelease(boolean enableNotifyAfterPopOrderLockRelease) {
         this.enableNotifyAfterPopOrderLockRelease = enableNotifyAfterPopOrderLockRelease;
+    }
+
+    public boolean isInitPopOffsetByCheckMsgInMem() {
+        return initPopOffsetByCheckMsgInMem;
+    }
+
+    public void setInitPopOffsetByCheckMsgInMem(boolean initPopOffsetByCheckMsgInMem) {
+        this.initPopOffsetByCheckMsgInMem = initPopOffsetByCheckMsgInMem;
+    }
+
+    public boolean isRetrieveMessageFromPopRetryTopicV1() {
+        return retrieveMessageFromPopRetryTopicV1;
+    }
+
+    public void setRetrieveMessageFromPopRetryTopicV1(boolean retrieveMessageFromPopRetryTopicV1) {
+        this.retrieveMessageFromPopRetryTopicV1 = retrieveMessageFromPopRetryTopicV1;
+    }
+
+    public boolean isEnableRetryTopicV2() {
+        return enableRetryTopicV2;
+    }
+
+    public void setEnableRetryTopicV2(boolean enableRetryTopicV2) {
+        this.enableRetryTopicV2 = enableRetryTopicV2;
     }
 
     public boolean isRealTimeNotifyConsumerChange() {
@@ -1371,6 +1635,14 @@ public class BrokerConfig extends BrokerIdentity {
 
     public void setAccountStatsPrintZeroValues(boolean accountStatsPrintZeroValues) {
         this.accountStatsPrintZeroValues = accountStatsPrintZeroValues;
+    }
+
+    public int getMaxStatsIdleTimeInMinutes() {
+        return maxStatsIdleTimeInMinutes;
+    }
+
+    public void setMaxStatsIdleTimeInMinutes(int maxStatsIdleTimeInMinutes) {
+        this.maxStatsIdleTimeInMinutes = maxStatsIdleTimeInMinutes;
     }
 
     public boolean isLockInStrictMode() {
@@ -1533,6 +1805,14 @@ public class BrokerConfig extends BrokerIdentity {
         this.metricsExporterType = MetricsExporterType.valueOf(metricsExporterType);
     }
 
+    public int getMetricsOtelCardinalityLimit() {
+        return metricsOtelCardinalityLimit;
+    }
+
+    public void setMetricsOtelCardinalityLimit(int metricsOtelCardinalityLimit) {
+        this.metricsOtelCardinalityLimit = metricsOtelCardinalityLimit;
+    }
+
     public String getMetricsGrpcExporterTarget() {
         return metricsGrpcExporterTarget;
     }
@@ -1589,6 +1869,14 @@ public class BrokerConfig extends BrokerIdentity {
         this.metricsInDelta = metricsInDelta;
     }
 
+    public int getMetricsExportBatchMaxDataPoints() {
+        return metricsExportBatchMaxDataPoints;
+    }
+
+    public void setMetricsExportBatchMaxDataPoints(int metricsExportBatchMaxDataPoints) {
+        this.metricsExportBatchMaxDataPoints = metricsExportBatchMaxDataPoints;
+    }
+
     public int getMetricsPromExporterPort() {
         return metricsPromExporterPort;
     }
@@ -1603,6 +1891,71 @@ public class BrokerConfig extends BrokerIdentity {
 
     public void setMetricsPromExporterHost(String metricsPromExporterHost) {
         this.metricsPromExporterHost = metricsPromExporterHost;
+    }
+
+    public boolean isEnablePopMetrics() {
+        return enablePopMetrics;
+    }
+
+    public void setEnablePopMetrics(boolean enablePopMetrics) {
+        this.enablePopMetrics = enablePopMetrics;
+    }
+
+    public boolean isEnableConnectionMetrics() {
+        return enableConnectionMetrics;
+    }
+
+    public void setEnableConnectionMetrics(boolean enableConnectionMetrics) {
+        this.enableConnectionMetrics = enableConnectionMetrics;
+    }
+
+    public boolean isEnableTransactionMetrics() {
+        return enableTransactionMetrics;
+    }
+
+    public void setEnableTransactionMetrics(boolean enableTransactionMetrics) {
+        this.enableTransactionMetrics = enableTransactionMetrics;
+    }
+
+    public boolean isEnableStatsMetrics() {
+        return enableStatsMetrics;
+    }
+
+    public void setEnableStatsMetrics(boolean enableStatsMetrics) {
+        this.enableStatsMetrics = enableStatsMetrics;
+    }
+
+    public boolean isEnableRequestMetrics() {
+        return enableRequestMetrics;
+    }
+
+    public void setEnableRequestMetrics(boolean enableRequestMetrics) {
+        this.enableRequestMetrics = enableRequestMetrics;
+    }
+
+
+    public boolean isEnableLagAndDlqMetrics() {
+        return enableLagAndDlqMetrics;
+    }
+
+    public void setEnableLagAndDlqMetrics(boolean enableLagAndDlqMetrics) {
+        this.enableLagAndDlqMetrics = enableLagAndDlqMetrics;
+    }
+
+    public boolean isEnableRemotingMetrics() {
+        return enableRemotingMetrics;
+    }
+
+    public void setEnableRemotingMetrics(boolean enableRemotingMetrics) {
+        this.enableRemotingMetrics = enableRemotingMetrics;
+    }
+
+    public boolean isEnableMessageStoreMetrics() {
+        return enableMessageStoreMetrics;
+    }
+
+    public void setEnableMessageStoreMetrics(boolean enableMessageStoreMetrics) {
+        this.enableMessageStoreMetrics = enableMessageStoreMetrics;
     }
 
     public int getTransactionOpMsgMaxSize() {
@@ -1653,11 +2006,443 @@ public class BrokerConfig extends BrokerIdentity {
         this.estimateAccumulation = estimateAccumulation;
     }
 
+    public boolean isColdCtrStrategyEnable() {
+        return coldCtrStrategyEnable;
+    }
+
+    public void setColdCtrStrategyEnable(boolean coldCtrStrategyEnable) {
+        this.coldCtrStrategyEnable = coldCtrStrategyEnable;
+    }
+
+    public boolean isUsePIDColdCtrStrategy() {
+        return usePIDColdCtrStrategy;
+    }
+
+    public void setUsePIDColdCtrStrategy(boolean usePIDColdCtrStrategy) {
+        this.usePIDColdCtrStrategy = usePIDColdCtrStrategy;
+    }
+
+    public long getCgColdReadThreshold() {
+        return cgColdReadThreshold;
+    }
+
+    public void setCgColdReadThreshold(long cgColdReadThreshold) {
+        this.cgColdReadThreshold = cgColdReadThreshold;
+    }
+
+    public long getGlobalColdReadThreshold() {
+        return globalColdReadThreshold;
+    }
+
+    public void setGlobalColdReadThreshold(long globalColdReadThreshold) {
+        this.globalColdReadThreshold = globalColdReadThreshold;
+    }
+
     public boolean isUseStaticSubscription() {
         return useStaticSubscription;
     }
 
     public void setUseStaticSubscription(boolean useStaticSubscription) {
         this.useStaticSubscription = useStaticSubscription;
+    }
+    
+    public long getFetchNamesrvAddrInterval() {
+        return fetchNamesrvAddrInterval;
+    }
+    
+    public void setFetchNamesrvAddrInterval(final long fetchNamesrvAddrInterval) {
+        this.fetchNamesrvAddrInterval = fetchNamesrvAddrInterval;
+    }
+
+    public boolean isPopResponseReturnActualRetryTopic() {
+        return popResponseReturnActualRetryTopic;
+    }
+
+    public void setPopResponseReturnActualRetryTopic(boolean popResponseReturnActualRetryTopic) {
+        this.popResponseReturnActualRetryTopic = popResponseReturnActualRetryTopic;
+    }
+
+    public boolean isEnableSingleTopicRegister() {
+        return enableSingleTopicRegister;
+    }
+
+    public void setEnableSingleTopicRegister(boolean enableSingleTopicRegister) {
+        this.enableSingleTopicRegister = enableSingleTopicRegister;
+    }
+
+    public boolean isEnableMixedMessageType() {
+        return enableMixedMessageType;
+    }
+
+    public void setEnableMixedMessageType(boolean enableMixedMessageType) {
+        this.enableMixedMessageType = enableMixedMessageType;
+    }
+
+    public boolean isEnableSplitRegistration() {
+        return enableSplitRegistration;
+    }
+
+    public void setEnableSplitRegistration(boolean enableSplitRegistration) {
+        this.enableSplitRegistration = enableSplitRegistration;
+    }
+
+    public boolean isEnableFastChannelEventProcess() {
+        return enableFastChannelEventProcess;
+    }
+
+    public void setEnableFastChannelEventProcess(boolean enableFastChannelEventProcess) {
+        this.enableFastChannelEventProcess = enableFastChannelEventProcess;
+    }
+
+    public boolean isPrintChannelGroups() {
+        return printChannelGroups;
+    }
+
+    public void setPrintChannelGroups(boolean printChannelGroups) {
+        this.printChannelGroups = printChannelGroups;
+    }
+
+    public int getPrintChannelGroupsMinNum() {
+        return printChannelGroupsMinNum;
+    }
+
+    public void setPrintChannelGroupsMinNum(int printChannelGroupsMinNum) {
+        this.printChannelGroupsMinNum = printChannelGroupsMinNum;
+    }
+
+    public int getSplitRegistrationSize() {
+        return splitRegistrationSize;
+    }
+
+    public void setSplitRegistrationSize(int splitRegistrationSize) {
+        this.splitRegistrationSize = splitRegistrationSize;
+    }
+
+    public long getTransactionMetricFlushInterval() {
+        return transactionMetricFlushInterval;
+    }
+
+    public void setTransactionMetricFlushInterval(long transactionMetricFlushInterval) {
+        this.transactionMetricFlushInterval = transactionMetricFlushInterval;
+    }
+
+    public void setTransactionCheckRocksdbCoreThreads(int transactionCheckRocksdbCoreThreads) {
+        this.transactionCheckRocksdbCoreThreads = transactionCheckRocksdbCoreThreads;
+    }
+
+    public int getTransactionCheckRocksdbCoreThreads() {
+        return transactionCheckRocksdbCoreThreads;
+    }
+
+    public int getTransactionCheckRocksdbMaxThreads() {
+        return transactionCheckRocksdbMaxThreads;
+    }
+
+    public void setTransactionCheckRocksdbMaxThreads(int transactionCheckRocksdbMaxThreads) {
+        this.transactionCheckRocksdbMaxThreads = transactionCheckRocksdbMaxThreads;
+    }
+
+    public int getTransactionCheckRocksdbQueueCapacity() {
+        return transactionCheckRocksdbQueueCapacity;
+    }
+
+    public void setTransactionCheckRocksdbQueueCapacity(int transactionCheckRocksdbQueueCapacity) {
+        this.transactionCheckRocksdbQueueCapacity = transactionCheckRocksdbQueueCapacity;
+    }
+
+    public long getPopInflightMessageThreshold() {
+        return popInflightMessageThreshold;
+    }
+
+    public void setPopInflightMessageThreshold(long popInflightMessageThreshold) {
+        this.popInflightMessageThreshold = popInflightMessageThreshold;
+    }
+
+    public boolean isEnablePopMessageThreshold() {
+        return enablePopMessageThreshold;
+    }
+
+    public void setEnablePopMessageThreshold(boolean enablePopMessageThreshold) {
+        this.enablePopMessageThreshold = enablePopMessageThreshold;
+    }
+
+    public boolean isSkipWhenCKRePutReachMaxTimes() {
+        return skipWhenCKRePutReachMaxTimes;
+    }
+
+    public void setSkipWhenCKRePutReachMaxTimes(boolean skipWhenCKRePutReachMaxTimes) {
+        this.skipWhenCKRePutReachMaxTimes = skipWhenCKRePutReachMaxTimes;
+    }
+
+    public int getUpdateNameServerAddrPeriod() {
+        return updateNameServerAddrPeriod;
+    }
+
+    public void setUpdateNameServerAddrPeriod(int updateNameServerAddrPeriod) {
+        this.updateNameServerAddrPeriod = updateNameServerAddrPeriod;
+    }
+
+    public boolean isAppendAckAsync() {
+        return appendAckAsync;
+    }
+
+    public void setAppendAckAsync(boolean appendAckAsync) {
+        this.appendAckAsync = appendAckAsync;
+    }
+
+    public boolean isAppendCkAsync() {
+        return appendCkAsync;
+    }
+
+    public void setAppendCkAsync(boolean appendCkAsync) {
+        this.appendCkAsync = appendCkAsync;
+    }
+
+    public boolean isClearRetryTopicWhenDeleteTopic() {
+        return clearRetryTopicWhenDeleteTopic;
+    }
+
+    public void setClearRetryTopicWhenDeleteTopic(boolean clearRetryTopicWhenDeleteTopic) {
+        this.clearRetryTopicWhenDeleteTopic = clearRetryTopicWhenDeleteTopic;
+    }
+
+    public boolean isEnableLmqStats() {
+        return enableLmqStats;
+    }
+
+    public void setEnableLmqStats(boolean enableLmqStats) {
+        this.enableLmqStats = enableLmqStats;
+    }
+
+    public String getConfigManagerVersion() {
+        return configManagerVersion;
+    }
+
+    public void setConfigManagerVersion(String configManagerVersion) {
+        this.configManagerVersion = configManagerVersion;
+    }
+
+    public boolean isUseSingleRocksDBForAllConfigs() {
+        return useSingleRocksDBForAllConfigs;
+    }
+
+    public void setUseSingleRocksDBForAllConfigs(boolean useSingleRocksDBForAllConfigs) {
+        this.useSingleRocksDBForAllConfigs = useSingleRocksDBForAllConfigs;
+    }
+
+    public boolean isAllowRecallWhenBrokerNotWriteable() {
+        return allowRecallWhenBrokerNotWriteable;
+    }
+
+    public void setAllowRecallWhenBrokerNotWriteable(boolean allowRecallWhenBrokerNotWriteable) {
+        this.allowRecallWhenBrokerNotWriteable = allowRecallWhenBrokerNotWriteable;
+    }
+
+    public boolean isRecallMessageEnable() {
+        return recallMessageEnable;
+    }
+
+    public void setRecallMessageEnable(boolean recallMessageEnable) {
+        this.recallMessageEnable = recallMessageEnable;
+    }
+
+    public boolean isEnableRegisterProducer() {
+        return enableRegisterProducer;
+    }
+
+    public void setEnableRegisterProducer(boolean enableRegisterProducer) {
+        this.enableRegisterProducer = enableRegisterProducer;
+    }
+
+    public boolean isEnableCreateSysGroup() {
+        return enableCreateSysGroup;
+    }
+
+    public void setEnableCreateSysGroup(boolean enableCreateSysGroup) {
+        this.enableCreateSysGroup = enableCreateSysGroup;
+    }
+
+    public boolean isEnableSplitMetadata() {
+        return enableSplitMetadata;
+    }
+
+    public void setEnableSplitMetadata(boolean enableSplitMetadata) {
+        this.enableSplitMetadata = enableSplitMetadata;
+    }
+
+    public int getSplitMetadataSize() {
+        return splitMetadataSize;
+    }
+
+    public void setSplitMetadataSize(int splitMetadataSize) {
+        this.splitMetadataSize = splitMetadataSize;
+    }
+
+    public int getPopFromRetryProbabilityForPriority() {
+        return popFromRetryProbabilityForPriority;
+    }
+
+    public void setPopFromRetryProbabilityForPriority(int popFromRetryProbabilityForPriority) {
+        this.popFromRetryProbabilityForPriority = popFromRetryProbabilityForPriority;
+    }
+
+    public boolean isPriorityOrderAsc() {
+        return priorityOrderAsc;
+    }
+
+    public void setPriorityOrderAsc(boolean priorityOrderAsc) {
+        this.priorityOrderAsc = priorityOrderAsc;
+    }
+
+    public boolean isUseSeparateRetryQueue() {
+        return useSeparateRetryQueue;
+    }
+
+    public void setUseSeparateRetryQueue(boolean useSeparateRetryQueue) {
+        this.useSeparateRetryQueue = useSeparateRetryQueue;
+    }
+
+    public boolean isEnableLiteEventMode() {
+        return enableLiteEventMode;
+    }
+
+    public void setEnableLiteEventMode(boolean enableLiteEventMode) {
+        this.enableLiteEventMode = enableLiteEventMode;
+    }
+
+    public long getLiteEventCheckInterval() {
+        return liteEventCheckInterval;
+    }
+
+    public void setLiteEventCheckInterval(long liteEventCheckInterval) {
+        this.liteEventCheckInterval = liteEventCheckInterval;
+    }
+
+    public long getLiteTtlCheckInterval() {
+        return liteTtlCheckInterval;
+    }
+
+    public void setLiteTtlCheckInterval(long liteTtlCheckInterval) {
+        this.liteTtlCheckInterval = liteTtlCheckInterval;
+    }
+
+    public long getMinLiteTTl() {
+        return minLiteTTl;
+    }
+
+    public void setMinLiteTTl(long minLiteTTl) {
+        this.minLiteTTl = minLiteTTl;
+    }
+
+    public long getLiteSubscriptionCheckInterval() {
+        return liteSubscriptionCheckInterval;
+    }
+
+    public void setLiteSubscriptionCheckInterval(long liteSubscriptionCheckInterval) {
+        this.liteSubscriptionCheckInterval = liteSubscriptionCheckInterval;
+    }
+
+    public long getLiteSubscriptionCheckTimeoutMills() {
+        return liteSubscriptionCheckTimeoutMills;
+    }
+
+    public void setLiteSubscriptionCheckTimeoutMills(long liteSubscriptionCheckTimeoutMills) {
+        this.liteSubscriptionCheckTimeoutMills = liteSubscriptionCheckTimeoutMills;
+    }
+
+    public boolean isPersistConsumerOffsetIncrementally() {
+        return persistConsumerOffsetIncrementally;
+    }
+
+    public void setPersistConsumerOffsetIncrementally(boolean persistConsumerOffsetIncrementally) {
+        this.persistConsumerOffsetIncrementally = persistConsumerOffsetIncrementally;
+    }
+
+    public long getMaxLiteSubscriptionCount() {
+        return maxLiteSubscriptionCount;
+    }
+
+    public void setMaxLiteSubscriptionCount(long maxLiteSubscriptionCount) {
+        this.maxLiteSubscriptionCount = maxLiteSubscriptionCount;
+    }
+
+    public boolean isEnableLitePopLog() {
+        return enableLitePopLog;
+    }
+
+    public void setEnableLitePopLog(boolean enableLitePopLog) {
+        this.enableLitePopLog = enableLitePopLog;
+    }
+
+    public int getMaxClientEventCount() {
+        return maxClientEventCount;
+    }
+
+    public void setMaxClientEventCount(int maxClientEventCount) {
+        this.maxClientEventCount = maxClientEventCount;
+    }
+
+    public long getLiteEventFullDispatchDelayTime() {
+        return liteEventFullDispatchDelayTime;
+    }
+
+    public void setLiteEventFullDispatchDelayTime(long liteEventFullDispatchDelayTime) {
+        this.liteEventFullDispatchDelayTime = liteEventFullDispatchDelayTime;
+    }
+
+    public long getLiteEventFullDispatchDelayTimeForWildcardGroup() {
+        return liteEventFullDispatchDelayTimeForWildcardGroup;
+    }
+
+    public void setLiteEventFullDispatchDelayTimeForWildcardGroup(long liteEventFullDispatchDelayTimeForWildcardGroup) {
+        this.liteEventFullDispatchDelayTimeForWildcardGroup = liteEventFullDispatchDelayTimeForWildcardGroup;
+    }
+
+    public boolean isLiteLagLatencyCollectEnable() {
+        return liteLagLatencyCollectEnable;
+    }
+
+    public void setLiteLagLatencyCollectEnable(boolean liteLagLatencyCollectEnable) {
+        this.liteLagLatencyCollectEnable = liteLagLatencyCollectEnable;
+    }
+
+    public boolean isLiteLagLatencyMetricsEnable() {
+        return liteLagLatencyMetricsEnable;
+    }
+
+    public void setLiteLagLatencyMetricsEnable(boolean liteLagLatencyMetricsEnable) {
+        this.liteLagLatencyMetricsEnable = liteLagLatencyMetricsEnable;
+    }
+
+    public boolean isLiteLagCountMetricsEnable() {
+        return liteLagCountMetricsEnable;
+    }
+
+    public void setLiteLagCountMetricsEnable(boolean liteLagCountMetricsEnable) {
+        this.liteLagCountMetricsEnable = liteLagCountMetricsEnable;
+    }
+
+    public int getLiteLagLatencyTopK() {
+        return liteLagLatencyTopK;
+    }
+
+    public void setLiteLagLatencyTopK(int liteLagLatencyTopK) {
+        this.liteLagLatencyTopK = liteLagLatencyTopK;
+    }
+
+    public boolean isUseMessageFilterForNotification() {
+        return useMessageFilterForNotification;
+    }
+
+    public void setUseMessageFilterForNotification(boolean useMessageFilterForNotification) {
+        this.useMessageFilterForNotification = useMessageFilterForNotification;
+    }
+
+    public int getMaxMessageFilterNumForNotification() {
+        return maxMessageFilterNumForNotification;
+    }
+
+    public void setMaxMessageFilterNumForNotification(int maxMessageFilterNumForNotification) {
+        this.maxMessageFilterNumForNotification = maxMessageFilterNumForNotification;
     }
 }

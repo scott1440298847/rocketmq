@@ -20,21 +20,17 @@ package org.apache.rocketmq.store.plugin;
 import io.opentelemetry.api.common.AttributesBuilder;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.sdk.metrics.InstrumentSelector;
-import io.opentelemetry.sdk.metrics.View;
-
+import io.opentelemetry.sdk.metrics.ViewBuilder;
 import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
-
+import org.apache.rocketmq.common.BoundaryType;
 import org.apache.rocketmq.common.Pair;
 import org.apache.rocketmq.common.SystemClock;
-import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.common.message.MessageExt;
 import org.apache.rocketmq.common.message.MessageExtBatch;
 import org.apache.rocketmq.common.message.MessageExtBrokerInner;
@@ -47,6 +43,7 @@ import org.apache.rocketmq.store.DispatchRequest;
 import org.apache.rocketmq.store.GetMessageResult;
 import org.apache.rocketmq.store.MessageFilter;
 import org.apache.rocketmq.store.MessageStore;
+import org.apache.rocketmq.store.MessageStoreStateMachine;
 import org.apache.rocketmq.store.PutMessageResult;
 import org.apache.rocketmq.store.QueryMessageResult;
 import org.apache.rocketmq.store.RunningFlags;
@@ -55,18 +52,21 @@ import org.apache.rocketmq.store.StoreCheckpoint;
 import org.apache.rocketmq.store.StoreStatsService;
 import org.apache.rocketmq.store.TransientStorePool;
 import org.apache.rocketmq.store.config.MessageStoreConfig;
+import org.apache.rocketmq.store.exception.ConsumeQueueException;
 import org.apache.rocketmq.store.ha.HAService;
 import org.apache.rocketmq.store.hook.PutMessageHook;
 import org.apache.rocketmq.store.hook.SendMessageBackHook;
 import org.apache.rocketmq.store.logfile.MappedFile;
 import org.apache.rocketmq.store.queue.ConsumeQueueInterface;
-import org.apache.rocketmq.store.queue.ConsumeQueueStore;
+import org.apache.rocketmq.store.queue.ConsumeQueueStoreInterface;
 import org.apache.rocketmq.store.stats.BrokerStatsManager;
 import org.apache.rocketmq.store.timer.TimerMessageStore;
 import org.apache.rocketmq.store.util.PerfCounter;
+import org.apache.rocketmq.store.metrics.StoreMetricsManager;
+import org.rocksdb.RocksDBException;
 
 public abstract class AbstractPluginMessageStore implements MessageStore {
-    protected MessageStore next = null;
+    protected MessageStore next;
     protected MessageStorePluginContext context;
 
     public AbstractPluginMessageStore(MessageStorePluginContext context, MessageStore next) {
@@ -142,12 +142,12 @@ public abstract class AbstractPluginMessageStore implements MessageStore {
     }
 
     @Override
-    public long getMaxOffsetInQueue(String topic, int queueId) {
+    public long getMaxOffsetInQueue(String topic, int queueId) throws ConsumeQueueException {
         return next.getMaxOffsetInQueue(topic, queueId);
     }
 
     @Override
-    public long getMaxOffsetInQueue(String topic, int queueId, boolean committed) {
+    public long getMaxOffsetInQueue(String topic, int queueId, boolean committed) throws ConsumeQueueException {
         return next.getMaxOffsetInQueue(topic, queueId, committed);
     }
 
@@ -164,6 +164,11 @@ public abstract class AbstractPluginMessageStore implements MessageStore {
     @Override
     public long getOffsetInQueueByTime(String topic, int queueId, long timestamp) {
         return next.getOffsetInQueueByTime(topic, queueId, timestamp);
+    }
+
+    @Override
+    public long getOffsetInQueueByTime(String topic, int queueId, long timestamp, BoundaryType boundaryType) {
+        return next.getOffsetInQueueByTime(topic, queueId, timestamp, boundaryType);
     }
 
     @Override
@@ -296,13 +301,18 @@ public abstract class AbstractPluginMessageStore implements MessageStore {
     }
 
     @Override
-    public long flush() {
-        return next.flush();
+    public long flushBehindBytes() {
+        return next.flushBehindBytes();
     }
 
     @Override
-    public boolean resetWriteOffset(long phyOffset) {
-        return next.resetWriteOffset(phyOffset);
+    public long dispatchBehindMilliseconds() {
+        return next.dispatchBehindMilliseconds();
+    }
+
+    @Override
+    public long flush() {
+        return next.flush();
     }
 
     @Override
@@ -462,7 +472,7 @@ public abstract class AbstractPluginMessageStore implements MessageStore {
     }
 
     @Override
-    public boolean truncateFiles(long offsetToTruncate) {
+    public boolean truncateFiles(long offsetToTruncate) throws RocksDBException {
         return next.truncateFiles(offsetToTruncate);
     }
 
@@ -516,7 +526,7 @@ public abstract class AbstractPluginMessageStore implements MessageStore {
 
     @Override
     public void onCommitLogDispatch(DispatchRequest dispatchRequest, boolean doDispatch, MappedFile commitLogFile,
-        boolean isRecover, boolean isFileEnd) {
+        boolean isRecover, boolean isFileEnd) throws RocksDBException {
         next.onCommitLogDispatch(dispatchRequest, doDispatch, commitLogFile, isRecover, isFileEnd);
     }
 
@@ -556,13 +566,8 @@ public abstract class AbstractPluginMessageStore implements MessageStore {
     }
 
     @Override
-    public void truncateDirtyLogicFiles(long phyOffset) {
+    public void truncateDirtyLogicFiles(long phyOffset) throws RocksDBException {
         next.truncateDirtyLogicFiles(phyOffset);
-    }
-
-    @Override
-    public void destroyLogics() {
-        next.destroyLogics();
     }
 
     @Override
@@ -576,7 +581,7 @@ public abstract class AbstractPluginMessageStore implements MessageStore {
     }
 
     @Override
-    public ConsumeQueueStore getQueueStore() {
+    public ConsumeQueueStoreInterface getQueueStore() {
         return next.getQueueStore();
     }
 
@@ -591,18 +596,13 @@ public abstract class AbstractPluginMessageStore implements MessageStore {
     }
 
     @Override
-    public void assignOffset(MessageExtBrokerInner msg, short messageNum) {
-        next.assignOffset(msg, messageNum);
+    public void assignOffset(MessageExtBrokerInner msg) throws RocksDBException {
+        next.assignOffset(msg);
     }
 
     @Override
-    public Map<String, TopicConfig> getTopicConfigs() {
-        return next.getTopicConfigs();
-    }
-
-    @Override
-    public Optional<TopicConfig> getTopicConfig(String topic) {
-        return next.getTopicConfig(topic);
+    public void increaseOffset(MessageExtBrokerInner msg, short messageNum) {
+        next.increaseOffset(msg, messageNum);
     }
 
     @Override
@@ -651,12 +651,36 @@ public abstract class AbstractPluginMessageStore implements MessageStore {
     }
 
     @Override
-    public List<Pair<InstrumentSelector, View>> getMetricsView() {
+    public List<Pair<InstrumentSelector, ViewBuilder>> getMetricsView() {
         return next.getMetricsView();
     }
 
     @Override
     public void initMetrics(Meter meter, Supplier<AttributesBuilder> attributesBuilderSupplier) {
         next.initMetrics(meter, attributesBuilderSupplier);
+    }
+
+    @Override
+    public void recoverTopicQueueTable() {
+        next.recoverTopicQueueTable();
+    }
+
+    @Override
+    public void notifyMessageArriveIfNecessary(DispatchRequest dispatchRequest) {
+        next.notifyMessageArriveIfNecessary(dispatchRequest);
+    }
+
+    public MessageStore getNext() {
+        return next;
+    }
+
+    @Override
+    public MessageStoreStateMachine getStateMachine() {
+        return next.getStateMachine();
+    }
+
+    @Override
+    public StoreMetricsManager getStoreMetricsManager() {
+        return next.getStoreMetricsManager();
     }
 }

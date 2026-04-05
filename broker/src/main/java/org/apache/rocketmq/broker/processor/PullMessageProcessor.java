@@ -20,14 +20,17 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import java.util.List;
 import java.util.Objects;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.client.ClientChannelInfo;
 import org.apache.rocketmq.broker.client.ConsumerGroupInfo;
 import org.apache.rocketmq.broker.client.ConsumerManager;
+import org.apache.rocketmq.broker.coldctr.ColdDataPullRequestHoldService;
 import org.apache.rocketmq.broker.filter.ConsumerFilterData;
 import org.apache.rocketmq.broker.filter.ConsumerFilterManager;
 import org.apache.rocketmq.broker.filter.ExpressionForRetryMessageFilter;
 import org.apache.rocketmq.broker.filter.ExpressionMessageFilter;
+import org.apache.rocketmq.broker.longpolling.PullRequest;
 import org.apache.rocketmq.broker.mqtrace.ConsumeMessageContext;
 import org.apache.rocketmq.broker.mqtrace.ConsumeMessageHook;
 import org.apache.rocketmq.broker.plugin.PullMessageResultHandler;
@@ -37,12 +40,12 @@ import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.common.constant.PermName;
 import org.apache.rocketmq.common.filter.ExpressionType;
 import org.apache.rocketmq.common.help.FAQUrl;
+import org.apache.rocketmq.common.lite.LiteUtil;
 import org.apache.rocketmq.common.sysflag.PullSysFlag;
 import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 import org.apache.rocketmq.remoting.common.RemotingHelper;
 import org.apache.rocketmq.remoting.exception.RemotingCommandException;
-import org.apache.rocketmq.remoting.netty.NettyRemotingAbstract;
 import org.apache.rocketmq.remoting.netty.NettyRequestProcessor;
 import org.apache.rocketmq.remoting.netty.RequestTask;
 import org.apache.rocketmq.remoting.protocol.ForbiddenType;
@@ -53,6 +56,7 @@ import org.apache.rocketmq.remoting.protocol.RequestSource;
 import org.apache.rocketmq.remoting.protocol.ResponseCode;
 import org.apache.rocketmq.remoting.protocol.filter.FilterAPI;
 import org.apache.rocketmq.remoting.protocol.header.PullMessageRequestHeader;
+import org.apache.rocketmq.remoting.netty.NettyRemotingAbstract;
 import org.apache.rocketmq.remoting.protocol.header.PullMessageResponseHeader;
 import org.apache.rocketmq.remoting.protocol.heartbeat.ConsumeType;
 import org.apache.rocketmq.remoting.protocol.heartbeat.MessageModel;
@@ -65,11 +69,13 @@ import org.apache.rocketmq.remoting.protocol.subscription.SubscriptionGroupConfi
 import org.apache.rocketmq.remoting.rpc.RpcClientUtils;
 import org.apache.rocketmq.remoting.rpc.RpcRequest;
 import org.apache.rocketmq.remoting.rpc.RpcResponse;
+import org.apache.rocketmq.store.DefaultMessageStore;
 import org.apache.rocketmq.store.GetMessageResult;
 import org.apache.rocketmq.store.GetMessageStatus;
 import org.apache.rocketmq.store.MessageFilter;
 import org.apache.rocketmq.store.MessageStore;
 import org.apache.rocketmq.store.config.BrokerRole;
+import org.apache.rocketmq.store.exception.ConsumeQueueException;
 import org.apache.rocketmq.store.stats.BrokerStatsManager;
 
 import static org.apache.rocketmq.remoting.protocol.RemotingCommand.buildErrorResponse;
@@ -126,7 +132,7 @@ public class PullMessageProcessor implements NettyRequestProcessor {
 
             int sysFlag = requestHeader.getSysFlag();
             requestHeader.setLo(false);
-            requestHeader.setBname(bname);
+            requestHeader.setBrokerName(bname);
             sysFlag = PullSysFlag.clearSuspendFlag(sysFlag);
             sysFlag = PullSysFlag.clearCommitOffsetFlag(sysFlag);
             requestHeader.setSysFlag(sysFlag);
@@ -283,7 +289,7 @@ public class PullMessageProcessor implements NettyRequestProcessor {
     @Override
     public RemotingCommand processRequest(final ChannelHandlerContext ctx,
         RemotingCommand request) throws RemotingCommandException {
-        return this.processRequest(ctx.channel(), request, true);
+        return this.processRequest(ctx.channel(), request, true, true);
     }
 
     @Override
@@ -295,8 +301,10 @@ public class PullMessageProcessor implements NettyRequestProcessor {
         return false;
     }
 
-    private RemotingCommand processRequest(final Channel channel, RemotingCommand request, boolean brokerAllowSuspend)
+    private RemotingCommand processRequest(final Channel channel, RemotingCommand request, boolean brokerAllowSuspend,
+        boolean brokerAllowFlowCtrSuspend)
         throws RemotingCommandException {
+        final long beginTimeMills = this.brokerController.getMessageStore().now();
         RemotingCommand response = RemotingCommand.createResponseCommand(PullMessageResponseHeader.class);
         final PullMessageResponseHeader responseHeader = (PullMessageResponseHeader) response.readCustomHeader();
         final PullMessageRequestHeader requestHeader =
@@ -365,7 +373,7 @@ public class PullMessageProcessor implements NettyRequestProcessor {
             String errorInfo = String.format("queueId[%d] is illegal, topic:[%s] topicConfig.readQueueNums:[%d] consumer:[%s]",
                 requestHeader.getQueueId(), requestHeader.getTopic(), topicConfig.getReadQueueNums(), channel.remoteAddress());
             LOGGER.warn(errorInfo);
-            response.setCode(ResponseCode.SYSTEM_ERROR);
+            response.setCode(ResponseCode.INVALID_PARAMETER);
             response.setRemark(errorInfo);
             return response;
         }
@@ -483,9 +491,49 @@ public class PullMessageProcessor implements NettyRequestProcessor {
                 this.brokerController.getConsumerFilterManager());
         }
 
+        if (brokerController.getBrokerConfig().isRejectPullConsumerEnable()) {
+            ConsumerGroupInfo consumerGroupInfo =
+                    this.brokerController.getConsumerManager().getConsumerGroupInfo(requestHeader.getConsumerGroup());
+            if (null == consumerGroupInfo || ConsumeType.CONSUME_ACTIVELY == consumerGroupInfo.getConsumeType()) {
+                if ((null == consumerGroupInfo || null == consumerGroupInfo.findChannel(channel))
+                        && !MixAll.isSysConsumerGroupPullMessage(requestHeader.getConsumerGroup())) {
+                    response.setCode(ResponseCode.SUBSCRIPTION_NOT_EXIST);
+                    response.setRemark("the consumer's group info not exist, or the pull consumer is rejected by server." + FAQUrl.suggestTodo(FAQUrl.SUBSCRIPTION_GROUP_NOT_EXIST));
+                    return response;
+                }
+            }
+        }
+
         final MessageStore messageStore = brokerController.getMessageStore();
+        if (this.brokerController.getMessageStore() instanceof DefaultMessageStore) {
+            DefaultMessageStore defaultMessageStore = (DefaultMessageStore) this.brokerController.getMessageStore();
+            boolean cgNeedColdDataFlowCtr = brokerController.getColdDataCgCtrService().isCgNeedColdDataFlowCtr(requestHeader.getConsumerGroup());
+            if (cgNeedColdDataFlowCtr) {
+                boolean isMsgLogicCold = defaultMessageStore.getCommitLog()
+                    .getColdDataCheckService().isMsgInColdArea(requestHeader.getConsumerGroup(),
+                        requestHeader.getTopic(), requestHeader.getQueueId(), requestHeader.getQueueOffset());
+                if (isMsgLogicCold) {
+                    ConsumeType consumeType = this.brokerController.getConsumerManager().getConsumerGroupInfo(requestHeader.getConsumerGroup()).getConsumeType();
+                    if (consumeType == ConsumeType.CONSUME_PASSIVELY) {
+                        response.setCode(ResponseCode.SYSTEM_BUSY);
+                        response.setRemark("This consumer group is reading cold data. It has been flow control");
+                        return response;
+                    } else if (consumeType == ConsumeType.CONSUME_ACTIVELY) {
+                        if (brokerAllowFlowCtrSuspend) {  // second arrived, which will not be held
+                            PullRequest pullRequest = new PullRequest(request, channel, 1000,
+                                this.brokerController.getMessageStore().now(), requestHeader.getQueueOffset(), subscriptionData, messageFilter);
+                            this.brokerController.getColdDataPullRequestHoldService().suspendColdDataReadRequest(pullRequest);
+                            return null;
+                        }
+                        requestHeader.setMaxMsgNums(1);
+                    }
+                }
+            }
+        }
+
         final boolean useResetOffsetFeature = brokerController.getBrokerConfig().isUseServerSideResetOffset();
         String topic = requestHeader.getTopic();
+        String liteTopic = requestHeader.getLiteTopic();
         String group = requestHeader.getConsumerGroup();
         int queueId = requestHeader.getQueueId();
         Long resetOffset = brokerController.getConsumerOffsetManager().queryThenEraseResetOffset(topic, group, queueId);
@@ -496,7 +544,11 @@ public class PullMessageProcessor implements NettyRequestProcessor {
             getMessageResult.setStatus(GetMessageStatus.OFFSET_RESET);
             getMessageResult.setNextBeginOffset(resetOffset);
             getMessageResult.setMinOffset(messageStore.getMinOffsetInQueue(topic, queueId));
-            getMessageResult.setMaxOffset(messageStore.getMaxOffsetInQueue(topic, queueId));
+            try {
+                getMessageResult.setMaxOffset(messageStore.getMaxOffsetInQueue(topic, queueId));
+            } catch (ConsumeQueueException e) {
+                throw new RemotingCommandException("Failed tp get max offset in queue", e);
+            }
             getMessageResult.setSuggestPullingFromSlave(false);
         } else {
             long broadcastInitOffset = queryBroadcastPullInitOffset(topic, group, queueId, requestHeader, channel);
@@ -507,7 +559,11 @@ public class PullMessageProcessor implements NettyRequestProcessor {
             } else {
                 SubscriptionData finalSubscriptionData = subscriptionData;
                 RemotingCommand finalResponse = response;
-                messageStore.getMessageAsync(group, topic, queueId, requestHeader.getQueueOffset(),
+                String storeTopic = topic;
+                if (StringUtils.isNotBlank(liteTopic)) {
+                    storeTopic = LiteUtil.toLmqName(topic, liteTopic);
+                }
+                messageStore.getMessageAsync(group, storeTopic, queueId, requestHeader.getQueueOffset(),
                         requestHeader.getMaxMsgNums(), messageFilter)
                     .thenApply(result -> {
                         if (null == result) {
@@ -515,7 +571,7 @@ public class PullMessageProcessor implements NettyRequestProcessor {
                             finalResponse.setRemark("store getMessage return null");
                             return finalResponse;
                         }
-
+                        brokerController.getColdDataCgCtrService().coldAcc(requestHeader.getConsumerGroup(), result.getColdDataSum());
                         return pullMessageResultHandler.handle(
                             result,
                             request,
@@ -526,10 +582,11 @@ public class PullMessageProcessor implements NettyRequestProcessor {
                             brokerAllowSuspend,
                             messageFilter,
                             finalResponse,
-                            mappingContext
+                            mappingContext,
+                            beginTimeMills
                         );
                     })
-                    .thenAccept(result -> NettyRemotingAbstract.writeResponse(channel, request, result));
+                    .thenAccept(result -> NettyRemotingAbstract.writeResponse(channel, request, result, null, brokerController.getBrokerMetricsManager().getRemotingMetricsManager()));
             }
         }
 
@@ -545,7 +602,8 @@ public class PullMessageProcessor implements NettyRequestProcessor {
                 brokerAllowSuspend,
                 messageFilter,
                 response,
-                mappingContext
+                mappingContext,
+                beginTimeMills
             );
         }
         return null;
@@ -555,6 +613,16 @@ public class PullMessageProcessor implements NettyRequestProcessor {
         return consumeMessageHookList != null && !this.consumeMessageHookList.isEmpty();
     }
 
+    /**
+     * Composes the header of the response message to be sent back to the client
+     *
+     * @param requestHeader           - the header of the request message
+     * @param getMessageResult        - the result of the GetMessage request
+     * @param topicSysFlag            - the system flag of the topic
+     * @param subscriptionGroupConfig - configuration of the subscription group
+     * @param response                - the response message to be sent back to the client
+     * @param clientAddress           - the address of the client
+     */
     protected void composeResponseHeader(PullMessageRequestHeader requestHeader, GetMessageResult getMessageResult,
         int topicSysFlag, SubscriptionGroupConfig subscriptionGroupConfig, RemotingCommand response,
         String clientAddress) {
@@ -572,6 +640,7 @@ public class PullMessageProcessor implements NettyRequestProcessor {
                 response.setCode(ResponseCode.SUCCESS);
                 break;
             case MESSAGE_WAS_REMOVING:
+            case NO_MATCHED_MESSAGE:
                 response.setCode(ResponseCode.PULL_RETRY_IMMEDIATELY);
                 break;
             case NO_MATCHED_LOGIC_QUEUE:
@@ -590,10 +659,8 @@ public class PullMessageProcessor implements NettyRequestProcessor {
                     response.setCode(ResponseCode.PULL_NOT_FOUND);
                 }
                 break;
-            case NO_MATCHED_MESSAGE:
-                response.setCode(ResponseCode.PULL_RETRY_IMMEDIATELY);
-                break;
             case OFFSET_FOUND_NULL:
+            case OFFSET_OVERFLOW_ONE:
                 response.setCode(ResponseCode.PULL_NOT_FOUND);
                 break;
             case OFFSET_OVERFLOW_BADLY:
@@ -601,9 +668,6 @@ public class PullMessageProcessor implements NettyRequestProcessor {
                 // XXX: warn and notify me
                 LOGGER.info("the request offset: {} over flow badly, fix to {}, broker max offset: {}, consumer: {}",
                     requestHeader.getQueueOffset(), getMessageResult.getNextBeginOffset(), getMessageResult.getMaxOffset(), clientAddress);
-                break;
-            case OFFSET_OVERFLOW_ONE:
-                response.setCode(ResponseCode.PULL_NOT_FOUND);
                 break;
             case OFFSET_RESET:
                 response.setCode(ResponseCode.PULL_OFFSET_MOVED);
@@ -669,6 +733,7 @@ public class PullMessageProcessor implements NettyRequestProcessor {
             context.setAccountOwnerParent(ownerParent);
             context.setAccountOwnerSelf(ownerSelf);
             context.setNamespace(NamespaceUtil.getNamespaceFromResource(requestHeader.getTopic()));
+            context.setFilterMessageCount(getMessageResult.getFilterMessageCount());
 
             switch (responseCode) {
                 case ResponseCode.SUCCESS:
@@ -741,7 +806,8 @@ public class PullMessageProcessor implements NettyRequestProcessor {
     public void executeRequestWhenWakeup(final Channel channel, final RemotingCommand request) {
         Runnable run = () -> {
             try {
-                final RemotingCommand response = PullMessageProcessor.this.processRequest(channel, request, false);
+                boolean brokerAllowFlowCtrSuspend = !(request.getExtFields() != null && request.getExtFields().containsKey(ColdDataPullRequestHoldService.NO_SUSPEND_KEY));
+                final RemotingCommand response = PullMessageProcessor.this.processRequest(channel, request, false, brokerAllowFlowCtrSuspend);
 
                 if (response != null) {
                     response.setOpaque(request.getOpaque());
@@ -753,7 +819,7 @@ public class PullMessageProcessor implements NettyRequestProcessor {
                                 LOGGER.error(request.toString());
                                 LOGGER.error(response.toString());
                             }
-                        });
+                        }, brokerController.getBrokerMetricsManager().getRemotingMetricsManager());
                     } catch (Throwable e) {
                         LOGGER.error("processRequestWrapper process request over, but response failed", e);
                         LOGGER.error(request.toString());
@@ -761,7 +827,7 @@ public class PullMessageProcessor implements NettyRequestProcessor {
                     }
                 }
             } catch (RemotingCommandException e1) {
-                LOGGER.error("excuteRequestWhenWakeup run", e1);
+                LOGGER.error("executeRequestWhenWakeup run", e1);
             }
         };
         this.brokerController.getPullMessageExecutor().submit(new RequestTask(run, channel, request));
@@ -817,7 +883,7 @@ public class PullMessageProcessor implements NettyRequestProcessor {
      * When pull request is not broadcast or not return -1
      */
     protected long queryBroadcastPullInitOffset(String topic, String group, int queueId,
-        PullMessageRequestHeader requestHeader, Channel channel) {
+        PullMessageRequestHeader requestHeader, Channel channel) throws RemotingCommandException {
 
         if (!this.brokerController.getBrokerConfig().isEnableBroadcastOffsetStore()) {
             return -1L;
@@ -839,8 +905,12 @@ public class PullMessageProcessor implements NettyRequestProcessor {
                 clientId = clientChannelInfo.getClientId();
             }
 
-            return this.brokerController.getBroadcastOffsetManager()
-                .queryInitOffset(topic, group, queueId, clientId, requestHeader.getQueueOffset(), proxyPullBroadcast);
+            try {
+                return this.brokerController.getBroadcastOffsetManager()
+                    .queryInitOffset(topic, group, queueId, clientId, requestHeader.getQueueOffset(), proxyPullBroadcast);
+            } catch (ConsumeQueueException e) {
+                throw new RemotingCommandException("Failed to query initial offset", e);
+            }
         }
         return -1L;
     }

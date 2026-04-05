@@ -17,6 +17,7 @@
 
 package org.apache.rocketmq.common.message;
 
+import java.util.HashMap;
 import java.util.Map;
 
 public class MessageAccessor {
@@ -89,6 +90,10 @@ public class MessageAccessor {
         return msg.getProperty(MessageConst.PROPERTY_CONSUME_START_TIMESTAMP);
     }
 
+    public static void setLiteTopic(final Message msg, String liteTopic) {
+        MessageAccessor.putProperty(msg, MessageConst.PROPERTY_LITE_TOPIC, liteTopic);
+    }
+
     public static Message cloneMessage(final Message msg) {
         Message newMsg = new Message(msg.getTopic(), msg.getBody());
         newMsg.setFlag(msg.getFlag());
@@ -96,4 +101,10 @@ public class MessageAccessor {
         return newMsg;
     }
 
+    public static Map<String, String> deepCopyProperties(Map<String, String> properties) {
+        if (properties == null) {
+            return null;
+        }
+        return new HashMap<>(properties);
+    }
 }

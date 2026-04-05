@@ -25,6 +25,7 @@ import java.util.Properties;
 
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.Option;
+import org.apache.commons.cli.OptionGroup;
 import org.apache.commons.cli.Options;
 import org.apache.rocketmq.client.exception.MQBrokerException;
 import org.apache.rocketmq.remoting.RPCHook;
@@ -45,18 +46,16 @@ public class GetBrokerConfigCommand implements SubCommand {
 
     @Override
     public String commandDesc() {
-        return "Get broker config by cluster or special broker!";
+        return "Get broker config by cluster or special broker.";
     }
 
     @Override
     public Options buildCommandlineOptions(final Options options) {
-        Option opt = new Option("b", "brokerAddr", true, "get which broker");
-        opt.setRequired(false);
-        options.addOption(opt);
-
-        opt = new Option("c", "clusterName", true, "get which cluster");
-        opt.setRequired(false);
-        options.addOption(opt);
+        OptionGroup group = new OptionGroup();
+        group.addOption(new Option("b", "brokerAddr", true, "get which broker"));
+        group.addOption(new Option("c", "clusterName", true, "get which cluster"));
+        group.setRequired(true);
+        options.addOptionGroup(group);
 
         return options;
     }

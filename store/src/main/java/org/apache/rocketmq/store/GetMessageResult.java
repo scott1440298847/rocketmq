@@ -41,6 +41,10 @@ public class GetMessageResult {
     private int msgCount4Commercial = 0;
     private int commercialSizePerMsg = 4 * 1024;
 
+    private long coldDataSum = 0L;
+
+    private int filterMessageCount;
+
     public static final GetMessageResult NO_MATCH_LOGIC_QUEUE =
         new GetMessageResult(GetMessageStatus.NO_MATCHED_LOGIC_QUEUE, 0, 0, 0, Collections.emptyList(),
             Collections.emptyList(), Collections.emptyList());
@@ -167,10 +171,26 @@ public class GetMessageResult {
         return messageQueueOffset;
     }
 
+    public long getColdDataSum() {
+        return coldDataSum;
+    }
+
+    public void setColdDataSum(long coldDataSum) {
+        this.coldDataSum = coldDataSum;
+    }
+
+    public int getFilterMessageCount() {
+        return filterMessageCount;
+    }
+
+    public void setFilterMessageCount(int filterMessageCount) {
+        this.filterMessageCount = filterMessageCount;
+    }
+
     @Override
     public String toString() {
         return "GetMessageResult [status=" + status + ", nextBeginOffset=" + nextBeginOffset + ", minOffset="
             + minOffset + ", maxOffset=" + maxOffset + ", bufferTotalSize=" + bufferTotalSize + ", messageCount=" + messageCount
-            + ", suggestPullingFromSlave=" + suggestPullingFromSlave + "]";
+            + ", filterMessageCount=" + filterMessageCount + ", suggestPullingFromSlave=" + suggestPullingFromSlave + "]";
     }
 }

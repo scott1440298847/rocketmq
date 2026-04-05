@@ -26,12 +26,11 @@ error_exit ()
 
 find_java_home()
 {
+    if [ -n "$JAVA_HOME" ]; then
+        return
+    fi
     case "`uname`" in
         Darwin)
-          if [ -n "$JAVA_HOME" ]; then
-              JAVA_HOME=$JAVA_HOME
-              return
-          fi
             JAVA_HOME=$(/usr/libexec/java_home)
         ;;
         *)
@@ -83,7 +82,7 @@ choose_gc_log_directory()
 choose_gc_options()
 {
     # Example of JAVA_MAJOR_VERSION value : '1', '9', '10', '11', ...
-    # '1' means releases befor Java 9
+    # '1' means releases before Java 9
     JAVA_MAJOR_VERSION=$("$JAVA" -version 2>&1 | awk -F '"' '/version/ {print $2}' | awk -F '.' '{print $1}')
     if [ -z "$JAVA_MAJOR_VERSION" ] || [ "$JAVA_MAJOR_VERSION" -lt "9" ] ; then
       JAVA_OPT="${JAVA_OPT} -server -Xms4g -Xmx4g -Xmn2g -XX:MetaspaceSize=128m -XX:MaxMetaspaceSize=320m"
@@ -105,4 +104,4 @@ JAVA_OPT="${JAVA_OPT} -XX:-UseLargePages"
 JAVA_OPT="${JAVA_OPT} ${JAVA_OPT_EXT}"
 JAVA_OPT="${JAVA_OPT} -cp ${CLASSPATH}"
 
-$JAVA ${JAVA_OPT} $@
+"$JAVA" ${JAVA_OPT} $@

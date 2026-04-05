@@ -16,24 +16,28 @@
  */
 package org.apache.rocketmq.proxy.service;
 
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.client.ConsumerManager;
 import org.apache.rocketmq.broker.client.ProducerManager;
+import org.apache.rocketmq.client.common.NameserverAccessConfig;
+import org.apache.rocketmq.client.impl.mqclient.DoNothingClientRemotingProcessor;
+import org.apache.rocketmq.client.impl.mqclient.MQClientAPIFactory;
 import org.apache.rocketmq.common.ThreadFactoryImpl;
-import org.apache.rocketmq.proxy.common.AbstractStartAndShutdown;
-import org.apache.rocketmq.proxy.common.StartAndShutdown;
+import org.apache.rocketmq.common.utils.AbstractStartAndShutdown;
+import org.apache.rocketmq.common.utils.StartAndShutdown;
+import org.apache.rocketmq.common.utils.ThreadUtils;
+import org.apache.rocketmq.proxy.config.ConfigurationManager;
+import org.apache.rocketmq.proxy.config.ProxyConfig;
 import org.apache.rocketmq.proxy.service.admin.AdminService;
 import org.apache.rocketmq.proxy.service.admin.DefaultAdminService;
 import org.apache.rocketmq.proxy.service.channel.ChannelManager;
+import org.apache.rocketmq.proxy.service.lite.LiteSubscriptionService;
 import org.apache.rocketmq.proxy.service.message.LocalMessageService;
 import org.apache.rocketmq.proxy.service.message.MessageService;
 import org.apache.rocketmq.proxy.service.metadata.LocalMetadataService;
 import org.apache.rocketmq.proxy.service.metadata.MetadataService;
-import org.apache.rocketmq.proxy.service.mqclient.DoNothingClientRemotingProcessor;
-import org.apache.rocketmq.proxy.service.mqclient.MQClientAPIFactory;
 import org.apache.rocketmq.proxy.service.relay.LocalProxyRelayService;
 import org.apache.rocketmq.proxy.service.relay.ProxyRelayService;
 import org.apache.rocketmq.proxy.service.route.LocalTopicRouteService;
@@ -55,14 +59,18 @@ public class LocalServiceManager extends AbstractStartAndShutdown implements Ser
     private final MQClientAPIFactory mqClientAPIFactory;
     private final ChannelManager channelManager;
 
-    private final ScheduledExecutorService scheduledExecutorService = Executors.newSingleThreadScheduledExecutor(
+    private final ScheduledExecutorService scheduledExecutorService = ThreadUtils.newSingleThreadScheduledExecutor(
         new ThreadFactoryImpl("LocalServiceManagerScheduledThread"));
 
     public LocalServiceManager(BrokerController brokerController, RPCHook rpcHook) {
         this.brokerController = brokerController;
         this.channelManager = new ChannelManager();
         this.messageService = new LocalMessageService(brokerController, channelManager, rpcHook);
+        ProxyConfig proxyConfig = ConfigurationManager.getProxyConfig();
+        NameserverAccessConfig nameserverAccessConfig = new NameserverAccessConfig(proxyConfig.getNamesrvAddr(),
+            proxyConfig.getNamesrvDomain(), proxyConfig.getNamesrvDomainSubgroup());
         this.mqClientAPIFactory = new MQClientAPIFactory(
+            nameserverAccessConfig,
             "LocalMQClient_",
             1,
             new DoNothingClientRemotingProcessor(null),
@@ -121,6 +129,11 @@ public class LocalServiceManager extends AbstractStartAndShutdown implements Ser
     @Override
     public AdminService getAdminService() {
         return this.adminService;
+    }
+
+    @Override
+    public LiteSubscriptionService getLiteSubscriptionService() {
+        return null;
     }
 
     private class LocalServiceManagerStartAndShutdown implements StartAndShutdown {

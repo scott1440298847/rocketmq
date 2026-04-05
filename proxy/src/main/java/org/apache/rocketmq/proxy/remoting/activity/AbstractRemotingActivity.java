@@ -25,13 +25,12 @@ import org.apache.rocketmq.client.exception.MQBrokerException;
 import org.apache.rocketmq.client.exception.MQClientException;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.common.message.MessageConst;
-import org.apache.rocketmq.common.utils.NetworkUtil;
+import org.apache.rocketmq.common.utils.ExceptionUtils;
 import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 import org.apache.rocketmq.proxy.common.ProxyContext;
 import org.apache.rocketmq.proxy.common.ProxyException;
 import org.apache.rocketmq.proxy.common.ProxyExceptionCode;
-import org.apache.rocketmq.proxy.common.utils.ExceptionUtils;
 import org.apache.rocketmq.proxy.config.ConfigurationManager;
 import org.apache.rocketmq.proxy.config.ProxyConfig;
 import org.apache.rocketmq.proxy.processor.MessagingProcessor;
@@ -46,6 +45,7 @@ public abstract class AbstractRemotingActivity implements NettyRequestProcessor 
     protected final MessagingProcessor messagingProcessor;
     protected static final String BROKER_NAME_FIELD = "bname";
     protected static final String BROKER_NAME_FIELD_FOR_SEND_MESSAGE_V2 = "n";
+    @SuppressWarnings("DoubleBraceInitialization")
     private static final Map<ProxyExceptionCode, Integer> PROXY_EXCEPTION_RESPONSE_CODE_MAP = new HashMap<ProxyExceptionCode, Integer>() {
         {
             put(ProxyExceptionCode.FORBIDDEN, ResponseCode.NO_PERMISSION);
@@ -64,7 +64,7 @@ public abstract class AbstractRemotingActivity implements NettyRequestProcessor 
     protected RemotingCommand request(ChannelHandlerContext ctx, RemotingCommand request,
         ProxyContext context, long timeoutMillis) throws Exception {
         String brokerName;
-        if (request.getCode() == RequestCode.SEND_MESSAGE_V2) {
+        if (request.getCode() == RequestCode.SEND_MESSAGE_V2 || request.getCode() == RequestCode.SEND_BATCH_MESSAGE) {
             if (request.getExtFields().get(BROKER_NAME_FIELD_FOR_SEND_MESSAGE_V2) == null) {
                 return RemotingCommand.buildErrorResponse(ResponseCode.VERSION_NOT_SUPPORTED,
                     "Request doesn't have field bname");
@@ -92,7 +92,7 @@ public abstract class AbstractRemotingActivity implements NettyRequestProcessor 
 
     @Override
     public RemotingCommand processRequest(ChannelHandlerContext ctx, RemotingCommand request) throws Exception {
-        ProxyContext context = createContext(ctx, request);
+        ProxyContext context = createContext();
         try {
             this.requestPipeline.execute(ctx, request, context);
             RemotingCommand response = this.processRequest0(ctx, request, context);
@@ -114,15 +114,8 @@ public abstract class AbstractRemotingActivity implements NettyRequestProcessor 
     protected abstract RemotingCommand processRequest0(ChannelHandlerContext ctx, RemotingCommand request,
         ProxyContext context) throws Exception;
 
-    protected ProxyContext createContext(ChannelHandlerContext ctx, RemotingCommand request) {
-        ProxyContext context = ProxyContext.create();
-        context.setAction("Remoting" + request.getCode())
-            .setLanguage(request.getLanguage().name())
-            .setChannel(ctx.channel())
-            .setLocalAddress(NetworkUtil.socketAddress2String(ctx.channel().localAddress()))
-            .setRemoteAddress(NetworkUtil.socketAddress2String(ctx.channel().remoteAddress()));
-
-        return context;
+    protected ProxyContext createContext() {
+        return ProxyContext.create();
     }
 
     protected void writeErrResponse(ChannelHandlerContext ctx, final ProxyContext context,

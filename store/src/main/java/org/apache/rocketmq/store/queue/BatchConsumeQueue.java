@@ -24,6 +24,8 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.function.Function;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.rocketmq.common.BoundaryType;
+import org.apache.rocketmq.common.Pair;
 import org.apache.rocketmq.common.attribute.CQType;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.common.message.MessageAccessor;
@@ -41,7 +43,7 @@ import org.apache.rocketmq.store.SelectMappedBufferResult;
 import org.apache.rocketmq.store.config.BrokerRole;
 import org.apache.rocketmq.store.logfile.MappedFile;
 
-public class BatchConsumeQueue implements ConsumeQueueInterface, FileQueueLifeCycle {
+public class BatchConsumeQueue implements ConsumeQueueInterface {
     protected static final Logger log = LoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
 
     /**
@@ -68,6 +70,7 @@ public class BatchConsumeQueue implements ConsumeQueueInterface, FileQueueLifeCy
     public static final int INVALID_POS = -1;
     protected final MappedFileQueue mappedFileQueue;
     protected MessageStore messageStore;
+    protected ConsumeQueueStore consumeQueueStore;
     protected final String topic;
     protected final int queueId;
     protected final ByteBuffer byteBufferItem;
@@ -91,24 +94,43 @@ public class BatchConsumeQueue implements ConsumeQueueInterface, FileQueueLifeCy
         final String storePath,
         final int mappedFileSize,
         final MessageStore messageStore,
+        final ConsumeQueueStore consumeQueueStore,
         final String subfolder) {
         this.storePath = storePath;
         this.mappedFileSize = mappedFileSize;
         this.messageStore = messageStore;
+        this.consumeQueueStore = consumeQueueStore;
         this.commitLogSize = messageStore.getCommitLog().getCommitLogSize();
 
         this.topic = topic;
         this.queueId = queueId;
 
+        boolean writeWithoutMmap = false;
+        if (messageStore.getMessageStoreConfig() != null) {
+            writeWithoutMmap = messageStore.getMessageStoreConfig().isWriteWithoutMmap();
+        }
+
         if (StringUtils.isBlank(subfolder)) {
             String queueDir = this.storePath + File.separator + topic + File.separator + queueId;
-            this.mappedFileQueue = new MappedFileQueue(queueDir, mappedFileSize, null);
+            this.mappedFileQueue = new MappedFileQueue(queueDir, mappedFileSize, null,
+                writeWithoutMmap);
         } else {
             String queueDir = this.storePath + File.separator + topic + File.separator + queueId + File.separator + subfolder;
-            this.mappedFileQueue = new MappedFileQueue(queueDir, mappedFileSize, null);
+            this.mappedFileQueue = new MappedFileQueue(queueDir, mappedFileSize, null,
+                writeWithoutMmap);
         }
 
         this.byteBufferItem = ByteBuffer.allocate(CQ_STORE_UNIT_SIZE);
+    }
+
+    public BatchConsumeQueue(
+        final String topic,
+        final int queueId,
+        final String storePath,
+        final int mappedFileSize,
+        final MessageStore messageStore,
+        final String subfolder) {
+        this(topic, queueId, storePath, mappedFileSize, messageStore, (ConsumeQueueStore) messageStore.getQueueStore(), subfolder);
     }
 
     public BatchConsumeQueue(
@@ -311,12 +333,31 @@ public class BatchConsumeQueue implements ConsumeQueueInterface, FileQueueLifeCy
     }
 
     @Override
+    public ReferredIterator<CqUnit> iterateFrom(long startIndex, int count) {
+        return iterateFrom(startIndex);
+    }
+
+    @Override
     public CqUnit get(long offset) {
         ReferredIterator<CqUnit> it = iterateFrom(offset);
         if (it == null) {
             return null;
         }
         return it.nextAndRelease();
+    }
+
+    @Override
+    public Pair<CqUnit, Long> getCqUnitAndStoreTime(long index) {
+        CqUnit cqUnit = get(index);
+        Long messageStoreTime = this.consumeQueueStore.getStoreTime(cqUnit);
+        return new Pair<>(cqUnit, messageStoreTime);
+    }
+
+    @Override
+    public Pair<CqUnit, Long> getEarliestUnitAndStoreTime() {
+        CqUnit cqUnit = getEarliestUnit();
+        Long messageStoreTime = this.consumeQueueStore.getStoreTime(cqUnit);
+        return new Pair<>(cqUnit, messageStoreTime);
     }
 
     @Override
@@ -353,7 +394,7 @@ public class BatchConsumeQueue implements ConsumeQueueInterface, FileQueueLifeCy
     @Override
     public void truncateDirtyLogicFiles(long phyOffset) {
 
-        long oldMinOffset =  minOffsetInQueue;
+        long oldMinOffset = minOffsetInQueue;
         long oldMaxOffset = maxOffsetInQueue;
 
         int logicFileSize = this.mappedFileSize;
@@ -495,7 +536,8 @@ public class BatchConsumeQueue implements ConsumeQueueInterface, FileQueueLifeCy
                 if (BrokerRole.SLAVE == this.messageStore.getMessageStoreConfig().getBrokerRole()) {
                     this.messageStore.getStoreCheckpoint().setPhysicMsgTimestamp(request.getStoreTimestamp());
                 }
-                this.messageStore.getStoreCheckpoint().setLogicsMsgTimestamp(request.getStoreTimestamp());
+                this.messageStore.getStoreCheckpoint().setTmpLogicsMsgTimestamp(request.getStoreTimestamp());
+                this.messageStore.getStoreCheckpoint().setTmpLogicsPhysicalOffset(request.getCommitLogOffset());
                 return;
             } else {
                 // XXX: warn and notify me
@@ -515,10 +557,10 @@ public class BatchConsumeQueue implements ConsumeQueueInterface, FileQueueLifeCy
     }
 
     @Override
-    public void assignQueueOffset(QueueOffsetAssigner queueOffsetAssigner, MessageExtBrokerInner msg, short messageNum) {
+    public void assignQueueOffset(QueueOffsetOperator queueOffsetOperator, MessageExtBrokerInner msg) {
         String topicQueueKey = getTopic() + "-" + getQueueId();
 
-        long queueOffset = queueOffsetAssigner.assignBatchQueueOffset(topicQueueKey, messageNum);
+        long queueOffset = queueOffsetOperator.getBatchQueueOffset(topicQueueKey);
 
         if (MessageSysFlag.check(msg.getSysFlag(), MessageSysFlag.INNER_BATCH_FLAG)) {
             MessageAccessor.putProperty(msg, MessageConst.PROPERTY_INNER_BASE, String.valueOf(queueOffset));
@@ -527,7 +569,15 @@ public class BatchConsumeQueue implements ConsumeQueueInterface, FileQueueLifeCy
         msg.setQueueOffset(queueOffset);
     }
 
-    public boolean putBatchMessagePositionInfo(final long offset, final int size, final long tagsCode, final long storeTime,
+    @Override
+    public void increaseQueueOffset(QueueOffsetOperator queueOffsetOperator, MessageExtBrokerInner msg,
+        short messageNum) {
+        String topicQueueKey = getTopic() + "-" + getQueueId();
+        queueOffsetOperator.increaseBatchQueueOffset(topicQueueKey, messageNum);
+    }
+
+    public boolean putBatchMessagePositionInfo(final long offset, final int size, final long tagsCode,
+        final long storeTime,
         final long msgBaseOffset, final short batchSize) {
 
         if (offset <= this.maxMsgPhyOffsetInCommitLog) {
@@ -558,7 +608,12 @@ public class BatchConsumeQueue implements ConsumeQueueInterface, FileQueueLifeCy
         MappedFile mappedFile = this.mappedFileQueue.getLastMappedFile(this.mappedFileQueue.getMaxOffset());
         if (mappedFile != null) {
             boolean isNewFile = isNewFile(mappedFile);
-            boolean appendRes = mappedFile.appendMessage(this.byteBufferItem.array());
+            boolean appendRes;
+            if (messageStore.getMessageStoreConfig().isPutConsumeQueueDataByFileChannel()) {
+                appendRes = mappedFile.appendMessageUsingFileChannel(this.byteBufferItem.array());
+            } else {
+                appendRes = mappedFile.appendMessage(this.byteBufferItem.array());
+            }
             if (appendRes) {
                 maxMsgPhyOffsetInCommitLog = offset;
                 maxOffsetInQueue = msgBaseOffset + batchSize;
@@ -696,11 +751,18 @@ public class BatchConsumeQueue implements ConsumeQueueInterface, FileQueueLifeCy
 
     /**
      * Find the message whose timestamp is the smallest, greater than or equal to the given time.
+     *
      * @param timestamp
      * @return
      */
+    @Deprecated
     @Override
     public long getOffsetInQueueByTime(final long timestamp) {
+        return getOffsetInQueueByTime(timestamp, BoundaryType.LOWER);
+    }
+
+    @Override
+    public long getOffsetInQueueByTime(long timestamp, BoundaryType boundaryType) {
         MappedFile targetBcq;
         BatchOffsetIndex targetMinOffset;
 
@@ -751,7 +813,7 @@ public class BatchConsumeQueue implements ConsumeQueueInterface, FileQueueLifeCy
             if (timestamp >= maxQueueTimestamp) {
                 return byteBuffer.getLong(right + MSG_BASE_OFFSET_INDEX);
             }
-            int mid = binarySearchRight(byteBuffer, left, right, CQ_STORE_UNIT_SIZE, MSG_STORE_TIME_OFFSET_INDEX, timestamp);
+            int mid = binarySearchRight(byteBuffer, left, right, CQ_STORE_UNIT_SIZE, MSG_STORE_TIME_OFFSET_INDEX, timestamp, boundaryType);
             if (mid != -1) {
                 return byteBuffer.getLong(mid + MSG_BASE_OFFSET_INDEX);
             }
@@ -794,8 +856,8 @@ public class BatchConsumeQueue implements ConsumeQueueInterface, FileQueueLifeCy
                 }
             } else {
                 //The max timestamp of this file is smaller than the given timestamp, so double check the previous file
-                if (i + 1 <=  mappedFileNum - 1) {
-                    mappedFile =  mappedFileQueue.getMappedFiles().get(i + 1);
+                if (i + 1 <= mappedFileNum - 1) {
+                    mappedFile = mappedFileQueue.getMappedFiles().get(i + 1);
                     targetBcq = mappedFile;
                     break;
                 } else {
@@ -810,10 +872,11 @@ public class BatchConsumeQueue implements ConsumeQueueInterface, FileQueueLifeCy
 
     /**
      * Find the offset of which the value is equal or larger than the given targetValue.
-     * If there are many values equal to the target, then find the earliest one.
+     * If there are many values equal to the target, then return the lowest offset if boundaryType is LOWER while
+     * return the highest offset if boundaryType is UPPER.
      */
-    public static int binarySearchRight(ByteBuffer byteBuffer, int left, int right, final int unitSize, final int unitShift,
-        long targetValue) {
+    public static int binarySearchRight(ByteBuffer byteBuffer, int left, int right, final int unitSize,
+        final int unitShift, long targetValue, BoundaryType boundaryType) {
         int mid = -1;
         while (left <= right) {
             mid = ceil((left + right) / 2);
@@ -830,14 +893,28 @@ public class BatchConsumeQueue implements ConsumeQueueInterface, FileQueueLifeCy
                 if (tmpValue >= targetValue) {
                     return mid;
                 } else {
-                    left =  mid + unitSize;
+                    left = mid + unitSize;
                 }
             } else {
                 //mid is actually in the mid
-                if (tmpValue < targetValue) {
-                    left = mid + unitSize;
-                } else {
-                    right = mid;
+                switch (boundaryType) {
+                    case LOWER:
+                        if (tmpValue < targetValue) {
+                            left = mid + unitSize;
+                        } else {
+                            right = mid;
+                        }
+                        break;
+                    case UPPER:
+                        if (tmpValue <= targetValue) {
+                            left = mid;
+                        } else {
+                            right = mid - unitSize;
+                        }
+                        break;
+                    default:
+                        log.warn("Unknown boundary type");
+                        return -1;
                 }
             }
         }
@@ -846,7 +923,7 @@ public class BatchConsumeQueue implements ConsumeQueueInterface, FileQueueLifeCy
 
     /**
      * Here is vulnerable, the min value of the bytebuffer must be smaller or equal then the given value.
-     * Otherwise it may get -1
+     * Otherwise, it may get -1
      */
     protected int binarySearch(ByteBuffer byteBuffer, int left, int right, final int unitSize, final int unitShift,
         long targetValue) {
@@ -989,6 +1066,7 @@ public class BatchConsumeQueue implements ConsumeQueueInterface, FileQueueLifeCy
 
     /**
      * Batch msg offset (deep logic offset)
+     *
      * @return max deep offset
      */
     @Override
@@ -1117,5 +1195,15 @@ public class BatchConsumeQueue implements ConsumeQueueInterface, FileQueueLifeCy
         }
         log.debug("Result={}, raw={}, match={}, sample={}", result, raw, match, sample);
         return result;
+    }
+
+    @Override
+    public void initializeWithOffset(long offset, long minPhyOffset) {
+        // not support now
+    }
+
+    @Override
+    public boolean shutdown() {
+        return true;
     }
 }

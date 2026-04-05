@@ -16,7 +16,6 @@
  */
 package org.apache.rocketmq.store;
 
-
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
@@ -38,9 +37,15 @@ public class MultiPathMappedFileQueue extends MappedFileQueue {
     private final Supplier<Set<String>> fullStorePathsSupplier;
 
     public MultiPathMappedFileQueue(MessageStoreConfig messageStoreConfig, int mappedFileSize,
+        AllocateMappedFileService allocateMappedFileService,
+        Supplier<Set<String>> fullStorePathsSupplier) {
+        this(messageStoreConfig, mappedFileSize, allocateMappedFileService, fullStorePathsSupplier, null);
+    }
+    public MultiPathMappedFileQueue(MessageStoreConfig messageStoreConfig, int mappedFileSize,
                                     AllocateMappedFileService allocateMappedFileService,
-                                    Supplier<Set<String>> fullStorePathsSupplier) {
-        super(messageStoreConfig.getStorePathCommitLog(), mappedFileSize, allocateMappedFileService);
+                                    Supplier<Set<String>> fullStorePathsSupplier, RunningFlags runningFlags) {
+        super(messageStoreConfig.getStorePathCommitLog(), mappedFileSize, allocateMappedFileService, runningFlags,
+              messageStoreConfig.isWriteWithoutMmap());
         this.config = messageStoreConfig;
         this.fullStorePathsSupplier = fullStorePathsSupplier;
     }
@@ -113,8 +118,7 @@ public class MultiPathMappedFileQueue extends MappedFileQueue {
             mf.destroy(1000 * 3);
         }
         this.mappedFiles.clear();
-        this.flushedWhere = 0;
-
+        this.setFlushedWhere(0);
 
         Set<String> storePathSet = getPaths();
         storePathSet.addAll(getReadonlyPaths());

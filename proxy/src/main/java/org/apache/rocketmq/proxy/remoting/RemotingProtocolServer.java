@@ -19,23 +19,20 @@ package org.apache.rocketmq.proxy.remoting;
 
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import io.netty.channel.Channel;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import org.apache.rocketmq.acl.AccessValidator;
-import org.apache.rocketmq.client.exception.MQClientException;
+import org.apache.rocketmq.auth.config.AuthConfig;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.common.future.FutureTaskExt;
 import org.apache.rocketmq.common.thread.ThreadPoolMonitor;
 import org.apache.rocketmq.common.thread.ThreadPoolStatusMonitor;
+import org.apache.rocketmq.common.utils.StartAndShutdown;
+import org.apache.rocketmq.common.utils.ThreadUtils;
 import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
-import org.apache.rocketmq.proxy.common.StartAndShutdown;
 import org.apache.rocketmq.proxy.config.ConfigurationManager;
 import org.apache.rocketmq.proxy.config.ProxyConfig;
 import org.apache.rocketmq.proxy.processor.MessagingProcessor;
@@ -46,16 +43,22 @@ import org.apache.rocketmq.proxy.remoting.activity.ConsumerManagerActivity;
 import org.apache.rocketmq.proxy.remoting.activity.GetTopicRouteActivity;
 import org.apache.rocketmq.proxy.remoting.activity.PopMessageActivity;
 import org.apache.rocketmq.proxy.remoting.activity.PullMessageActivity;
+import org.apache.rocketmq.proxy.remoting.activity.RecallMessageActivity;
 import org.apache.rocketmq.proxy.remoting.activity.SendMessageActivity;
 import org.apache.rocketmq.proxy.remoting.activity.TransactionActivity;
 import org.apache.rocketmq.proxy.remoting.channel.RemotingChannelManager;
 import org.apache.rocketmq.proxy.remoting.pipeline.AuthenticationPipeline;
+import org.apache.rocketmq.proxy.remoting.pipeline.AuthorizationPipeline;
+import org.apache.rocketmq.proxy.remoting.pipeline.ContextInitPipeline;
 import org.apache.rocketmq.proxy.remoting.pipeline.RequestPipeline;
+import org.apache.rocketmq.proxy.service.cert.TlsCertificateManager;
 import org.apache.rocketmq.remoting.ChannelEventListener;
+import org.apache.rocketmq.remoting.InvokeCallback;
 import org.apache.rocketmq.remoting.RemotingServer;
 import org.apache.rocketmq.remoting.netty.NettyRemotingServer;
 import org.apache.rocketmq.remoting.netty.NettyServerConfig;
 import org.apache.rocketmq.remoting.netty.RequestTask;
+import org.apache.rocketmq.remoting.netty.ResponseFuture;
 import org.apache.rocketmq.remoting.netty.TlsSystemConfig;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 import org.apache.rocketmq.remoting.protocol.RequestCode;
@@ -72,6 +75,7 @@ public class RemotingProtocolServer implements StartAndShutdown, RemotingProxyOu
     protected final ClientManagerActivity clientManagerActivity;
     protected final ConsumerManagerActivity consumerManagerActivity;
     protected final SendMessageActivity sendMessageActivity;
+    protected final RecallMessageActivity recallMessageActivity;
     protected final TransactionActivity transactionActivity;
     protected final PullMessageActivity pullMessageActivity;
     protected final PopMessageActivity popMessageActivity;
@@ -84,16 +88,20 @@ public class RemotingProtocolServer implements StartAndShutdown, RemotingProxyOu
     protected final ThreadPoolExecutor topicRouteExecutor;
     protected final ThreadPoolExecutor defaultExecutor;
     protected final ScheduledExecutorService timerExecutor;
+    protected final TlsCertificateManager tlsCertificateManager;
+    protected final RemotingTlsReloadHandler tlsReloadHandler;
 
-    public RemotingProtocolServer(MessagingProcessor messagingProcessor) {
+
+    public RemotingProtocolServer(MessagingProcessor messagingProcessor, TlsCertificateManager tlsCertificateManager) throws Exception {
         this.messagingProcessor = messagingProcessor;
         this.remotingChannelManager = new RemotingChannelManager(this, messagingProcessor.getProxyRelayService());
 
-        RequestPipeline pipeline = createRequestPipeline();
+        RequestPipeline pipeline = createRequestPipeline(messagingProcessor);
         this.getTopicRouteActivity = new GetTopicRouteActivity(pipeline, messagingProcessor);
         this.clientManagerActivity = new ClientManagerActivity(pipeline, messagingProcessor, remotingChannelManager);
         this.consumerManagerActivity = new ConsumerManagerActivity(pipeline, messagingProcessor);
         this.sendMessageActivity = new SendMessageActivity(pipeline, messagingProcessor);
+        this.recallMessageActivity = new RecallMessageActivity(pipeline, messagingProcessor);
         this.transactionActivity = new TransactionActivity(pipeline, messagingProcessor);
         this.pullMessageActivity = new PullMessageActivity(pipeline, messagingProcessor);
         this.popMessageActivity = new PopMessageActivity(pipeline, messagingProcessor);
@@ -109,6 +117,10 @@ public class RemotingProtocolServer implements StartAndShutdown, RemotingProxyOu
         System.setProperty(TlsSystemConfig.TLS_SERVER_CERTPATH, config.getTlsCertPath());
         TlsSystemConfig.tlsServerKeyPath = config.getTlsKeyPath();
         System.setProperty(TlsSystemConfig.TLS_SERVER_KEYPATH, config.getTlsKeyPath());
+        TlsSystemConfig.tlsServerKeyPassword = config.getTlsKeyPassword();
+        System.setProperty(TlsSystemConfig.TLS_SERVER_KEYPASSWORD, config.getTlsKeyPassword());
+        this.tlsCertificateManager = tlsCertificateManager;
+        this.tlsReloadHandler = new RemotingTlsReloadHandler();
 
         this.clientHousekeepingService = new ClientHousekeepingService(this.clientManagerActivity);
 
@@ -117,7 +129,6 @@ public class RemotingProtocolServer implements StartAndShutdown, RemotingProxyOu
         } else {
             this.defaultRemotingServer = new NettyRemotingServer(defaultServerConfig, this.clientHousekeepingService);
         }
-        this.registerRemotingServer(this.defaultRemotingServer);
 
         this.sendMessageExecutor = ThreadPoolMonitor.createAndMonitor(
             config.getRemotingSendMessageThreadPoolNums(),
@@ -179,10 +190,22 @@ public class RemotingProtocolServer implements StartAndShutdown, RemotingProxyOu
             new ThreadPoolHeadSlowTimeMillsMonitor(config.getRemotingWaitTimeMillsInDefaultQueue())
         );
 
-        this.timerExecutor = Executors.newSingleThreadScheduledExecutor(
+        this.timerExecutor = ThreadUtils.newSingleThreadScheduledExecutor(
             new ThreadFactoryBuilder().setNameFormat("RemotingServerScheduler-%d").build()
         );
-        this.timerExecutor.scheduleAtFixedRate(this::cleanExpireRequest, 10, 10, TimeUnit.SECONDS);
+        this.timerExecutor.scheduleAtFixedRate(this::cleanExpireRequest, 100, 100, TimeUnit.MILLISECONDS);
+
+        this.registerRemotingServer(this.defaultRemotingServer);
+    }
+
+    protected class RemotingTlsReloadHandler implements TlsCertificateManager.TlsContextReloadListener {
+        @Override
+        public void onTlsContextReload() {
+            if (defaultRemotingServer instanceof NettyRemotingServer) {
+                ((NettyRemotingServer) defaultRemotingServer).loadSslContext();
+                log.info("SslContext reloaded for remoting server");
+            }
+        }
     }
 
     protected void registerRemotingServer(RemotingServer remotingServer) {
@@ -192,6 +215,7 @@ public class RemotingProtocolServer implements StartAndShutdown, RemotingProxyOu
         remotingServer.registerProcessor(RequestCode.CONSUMER_SEND_MSG_BACK, sendMessageActivity, sendMessageExecutor);
 
         remotingServer.registerProcessor(RequestCode.END_TRANSACTION, transactionActivity, sendMessageExecutor);
+        remotingServer.registerProcessor(RequestCode.RECALL_MESSAGE, recallMessageActivity, sendMessageExecutor);
 
         remotingServer.registerProcessor(RequestCode.HEART_BEAT, clientManagerActivity, this.heartbeatExecutor);
         remotingServer.registerProcessor(RequestCode.UNREGISTER_CLIENT, clientManagerActivity, this.defaultExecutor);
@@ -219,6 +243,9 @@ public class RemotingProtocolServer implements StartAndShutdown, RemotingProxyOu
 
     @Override
     public void shutdown() throws Exception {
+        // Unregister the TLS context reload handler
+        tlsCertificateManager.unregisterReloadListener(this.tlsReloadHandler);
+
         this.defaultRemotingServer.shutdown();
         this.remotingChannelManager.shutdown();
         this.sendMessageExecutor.shutdown();
@@ -231,6 +258,9 @@ public class RemotingProtocolServer implements StartAndShutdown, RemotingProxyOu
 
     @Override
     public void start() throws Exception {
+        // Register the TLS context reload handler
+        tlsCertificateManager.registerReloadListener(this.tlsReloadHandler);
+
         this.remotingChannelManager.start();
         this.defaultRemotingServer.start();
     }
@@ -240,12 +270,21 @@ public class RemotingProtocolServer implements StartAndShutdown, RemotingProxyOu
         long timeoutMillis) {
         CompletableFuture<RemotingCommand> future = new CompletableFuture<>();
         try {
-            this.defaultRemotingServer.invokeAsync(channel, request, timeoutMillis, responseFuture -> {
-                if (responseFuture.getResponseCommand() == null) {
-                    future.completeExceptionally(new MQClientException("response is null after send request to client", responseFuture.getCause()));
-                    return;
+            this.defaultRemotingServer.invokeAsync(channel, request, timeoutMillis, new InvokeCallback() {
+                @Override
+                public void operationComplete(ResponseFuture responseFuture) {
+
                 }
-                future.complete(responseFuture.getResponseCommand());
+
+                @Override
+                public void operationSucceed(RemotingCommand response) {
+                    future.complete(response);
+                }
+
+                @Override
+                public void operationFail(Throwable throwable) {
+                    future.completeExceptionally(throwable);
+                }
             });
         } catch (Throwable t) {
             future.completeExceptionally(t);
@@ -253,14 +292,17 @@ public class RemotingProtocolServer implements StartAndShutdown, RemotingProxyOu
         return future;
     }
 
-    protected RequestPipeline createRequestPipeline() {
+    protected RequestPipeline createRequestPipeline(MessagingProcessor messagingProcessor) {
         RequestPipeline pipeline = (ctx, request, context) -> {
         };
-
-        List<AccessValidator> accessValidatorList = new ArrayList<>();
         // add pipeline
         // the last pipe add will execute at the first
-        return pipeline.pipe(new AuthenticationPipeline(accessValidatorList));
+        AuthConfig authConfig = ConfigurationManager.getAuthConfig();
+        if (authConfig != null) {
+            pipeline = pipeline.pipe(new AuthorizationPipeline(authConfig, messagingProcessor))
+                .pipe(new AuthenticationPipeline(authConfig, messagingProcessor));
+        }
+        return pipeline.pipe(new ContextInitPipeline());
     }
 
     protected class ThreadPoolHeadSlowTimeMillsMonitor implements ThreadPoolStatusMonitor {

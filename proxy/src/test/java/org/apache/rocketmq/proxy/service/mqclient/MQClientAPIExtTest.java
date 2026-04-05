@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
@@ -36,11 +37,15 @@ import org.apache.rocketmq.client.consumer.PopStatus;
 import org.apache.rocketmq.client.consumer.PullCallback;
 import org.apache.rocketmq.client.consumer.PullResult;
 import org.apache.rocketmq.client.consumer.PullStatus;
+import org.apache.rocketmq.client.exception.MQBrokerException;
 import org.apache.rocketmq.client.impl.CommunicationMode;
 import org.apache.rocketmq.client.impl.MQClientAPIImpl;
 import org.apache.rocketmq.client.impl.consumer.PullResultExt;
+import org.apache.rocketmq.client.impl.mqclient.DoNothingClientRemotingProcessor;
+import org.apache.rocketmq.client.impl.mqclient.MQClientAPIExt;
 import org.apache.rocketmq.client.producer.SendResult;
 import org.apache.rocketmq.client.producer.SendStatus;
+import org.apache.rocketmq.common.lite.LiteSubscriptionDTO;
 import org.apache.rocketmq.common.message.MessageClientIDSetter;
 import org.apache.rocketmq.common.message.MessageDecoder;
 import org.apache.rocketmq.common.message.MessageExt;
@@ -51,6 +56,7 @@ import org.apache.rocketmq.remoting.netty.NettyClientConfig;
 import org.apache.rocketmq.remoting.netty.ResponseFuture;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 import org.apache.rocketmq.remoting.protocol.ResponseCode;
+import org.apache.rocketmq.remoting.protocol.body.GetLiteTopicInfoResponseBody;
 import org.apache.rocketmq.remoting.protocol.header.AckMessageRequestHeader;
 import org.apache.rocketmq.remoting.protocol.header.ChangeInvisibleTimeRequestHeader;
 import org.apache.rocketmq.remoting.protocol.header.ConsumerSendMsgBackRequestHeader;
@@ -59,6 +65,7 @@ import org.apache.rocketmq.remoting.protocol.header.GetConsumerListByGroupRespon
 import org.apache.rocketmq.remoting.protocol.header.GetConsumerListByGroupResponseHeader;
 import org.apache.rocketmq.remoting.protocol.header.GetMaxOffsetRequestHeader;
 import org.apache.rocketmq.remoting.protocol.header.GetMaxOffsetResponseHeader;
+import org.apache.rocketmq.remoting.protocol.header.PopLiteMessageRequestHeader;
 import org.apache.rocketmq.remoting.protocol.header.PopMessageRequestHeader;
 import org.apache.rocketmq.remoting.protocol.header.PullMessageRequestHeader;
 import org.apache.rocketmq.remoting.protocol.header.SearchOffsetRequestHeader;
@@ -83,6 +90,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 
 @RunWith(MockitoJUnitRunner.class)
 public class MQClientAPIExtTest {
@@ -107,13 +115,9 @@ public class MQClientAPIExtTest {
 
     @Test
     public void testSendHeartbeatAsync() throws Exception {
-        doAnswer((Answer<Void>) mock -> {
-            InvokeCallback invokeCallback = mock.getArgument(3);
-            ResponseFuture responseFuture = new ResponseFuture(null, 0, 3000, invokeCallback, null);
-            responseFuture.putResponse(RemotingCommand.createResponseCommand(ResponseCode.SUCCESS, ""));
-            invokeCallback.operationComplete(responseFuture);
-            return null;
-        }).when(remotingClient).invokeAsync(anyString(), any(RemotingCommand.class), anyLong(), any());
+        CompletableFuture<RemotingCommand> future = new CompletableFuture<>();
+        future.complete(RemotingCommand.createResponseCommand(ResponseCode.SUCCESS, ""));
+        doReturn(future).when(remotingClient).invoke(anyString(), any(RemotingCommand.class), anyLong());
 
         assertNotNull(mqClientAPI.sendHeartbeatAsync(BROKER_ADDR, new HeartbeatData(), TIMEOUT).get());
     }
@@ -121,20 +125,16 @@ public class MQClientAPIExtTest {
     @Test
     public void testSendMessageAsync() throws Exception {
         AtomicReference<String> msgIdRef = new AtomicReference<>();
-        doAnswer((Answer<Void>) mock -> {
-            InvokeCallback invokeCallback = mock.getArgument(3);
-            ResponseFuture responseFuture = new ResponseFuture(null, 0, 3000, invokeCallback, null);
-            RemotingCommand response = RemotingCommand.createResponseCommand(SendMessageResponseHeader.class);
-            SendMessageResponseHeader sendMessageResponseHeader = (SendMessageResponseHeader) response.readCustomHeader();
-            sendMessageResponseHeader.setMsgId(msgIdRef.get());
-            sendMessageResponseHeader.setQueueId(0);
-            sendMessageResponseHeader.setQueueOffset(1L);
-            response.setCode(ResponseCode.SUCCESS);
-            response.makeCustomHeaderToNet();
-            responseFuture.putResponse(response);
-            invokeCallback.operationComplete(responseFuture);
-            return null;
-        }).when(remotingClient).invokeAsync(anyString(), any(RemotingCommand.class), anyLong(), any());
+        CompletableFuture<RemotingCommand> future = new CompletableFuture<>();
+        RemotingCommand response = RemotingCommand.createResponseCommand(SendMessageResponseHeader.class);
+        SendMessageResponseHeader sendMessageResponseHeader = (SendMessageResponseHeader) response.readCustomHeader();
+        sendMessageResponseHeader.setMsgId(msgIdRef.get());
+        sendMessageResponseHeader.setQueueId(0);
+        sendMessageResponseHeader.setQueueOffset(1L);
+        response.setCode(ResponseCode.SUCCESS);
+        response.makeCustomHeaderToNet();
+        future.complete(response);
+        doReturn(future).when(remotingClient).invoke(anyString(), any(RemotingCommand.class), anyLong());
 
         MessageExt messageExt = createMessage();
         msgIdRef.set(MessageClientIDSetter.getUniqID(messageExt));
@@ -148,20 +148,16 @@ public class MQClientAPIExtTest {
 
     @Test
     public void testSendMessageListAsync() throws Exception {
-        doAnswer((Answer<Void>) mock -> {
-            InvokeCallback invokeCallback = mock.getArgument(3);
-            ResponseFuture responseFuture = new ResponseFuture(null, 0, 3000, invokeCallback, null);
-            RemotingCommand response = RemotingCommand.createResponseCommand(SendMessageResponseHeader.class);
-            SendMessageResponseHeader sendMessageResponseHeader = (SendMessageResponseHeader) response.readCustomHeader();
-            sendMessageResponseHeader.setMsgId("");
-            sendMessageResponseHeader.setQueueId(0);
-            sendMessageResponseHeader.setQueueOffset(1L);
-            response.setCode(ResponseCode.SUCCESS);
-            response.makeCustomHeaderToNet();
-            responseFuture.putResponse(response);
-            invokeCallback.operationComplete(responseFuture);
-            return null;
-        }).when(remotingClient).invokeAsync(anyString(), any(RemotingCommand.class), anyLong(), any());
+        CompletableFuture<RemotingCommand> future = new CompletableFuture<>();
+        RemotingCommand response = RemotingCommand.createResponseCommand(SendMessageResponseHeader.class);
+        SendMessageResponseHeader sendMessageResponseHeader = (SendMessageResponseHeader) response.readCustomHeader();
+        sendMessageResponseHeader.setMsgId("");
+        sendMessageResponseHeader.setQueueId(0);
+        sendMessageResponseHeader.setQueueOffset(1L);
+        response.setCode(ResponseCode.SUCCESS);
+        response.makeCustomHeaderToNet();
+        future.complete(response);
+        doReturn(future).when(remotingClient).invoke(anyString(), any(RemotingCommand.class), anyLong());
 
         List<MessageExt> messageExtList = new ArrayList<>();
         StringBuilder sb = new StringBuilder();
@@ -180,13 +176,9 @@ public class MQClientAPIExtTest {
 
     @Test
     public void testSendMessageBackAsync() throws Exception {
-        doAnswer((Answer<Void>) mock -> {
-            InvokeCallback invokeCallback = mock.getArgument(3);
-            ResponseFuture responseFuture = new ResponseFuture(null, 0, 3000, invokeCallback, null);
-            responseFuture.putResponse(RemotingCommand.createResponseCommand(ResponseCode.SUCCESS, ""));
-            invokeCallback.operationComplete(responseFuture);
-            return null;
-        }).when(remotingClient).invokeAsync(anyString(), any(RemotingCommand.class), anyLong(), any());
+        CompletableFuture<RemotingCommand> future = new CompletableFuture<>();
+        future.complete(RemotingCommand.createResponseCommand(ResponseCode.SUCCESS, ""));
+        doReturn(future).when(remotingClient).invoke(anyString(), any(RemotingCommand.class), anyLong());
 
         RemotingCommand remotingCommand = mqClientAPI.sendMessageBackAsync(BROKER_ADDR, new ConsumerSendMsgBackRequestHeader(), TIMEOUT)
             .get();
@@ -207,6 +199,31 @@ public class MQClientAPIExtTest {
     }
 
     @Test
+    public void testPopLiteMessageAsync() throws Exception {
+        PopResult popResult = new PopResult(PopStatus.FOUND, new ArrayList<>());
+        doAnswer((Answer<Void>) mock -> {
+            PopCallback popCallback = mock.getArgument(4);
+            popCallback.onSuccess(popResult);
+            return null;
+        }).when(mqClientAPI).popLiteMessageAsync(anyString(), anyString(), any(), anyLong(), any());
+
+        assertSame(popResult, mqClientAPI.popLiteMessageAsync(BROKER_ADDR, BROKER_NAME, new PopLiteMessageRequestHeader(), TIMEOUT).get());
+    }
+
+    @Test
+    public void testPopLiteMessageAsync_Exception() throws Exception {
+        Throwable throwable = new RuntimeException("test exception");
+        doAnswer((Answer<Void>) mock -> {
+            PopCallback popCallback = mock.getArgument(4);
+            popCallback.onException(throwable);
+            return null;
+        }).when(mqClientAPI).popLiteMessageAsync(anyString(), anyString(), any(), anyLong(), any());
+
+        CompletableFuture<PopResult> future = mqClientAPI.popLiteMessageAsync(BROKER_ADDR, BROKER_NAME, new PopLiteMessageRequestHeader(), TIMEOUT);
+        assertTrue(future.isCompletedExceptionally());
+    }
+
+    @Test
     public void testAckMessageAsync() throws Exception {
         AckResult ackResult = new AckResult();
         doAnswer((Answer<Void>) mock -> {
@@ -216,6 +233,18 @@ public class MQClientAPIExtTest {
         }).when(mqClientAPI).ackMessageAsync(anyString(), anyLong(), any(AckCallback.class), any());
 
         assertSame(ackResult, mqClientAPI.ackMessageAsync(BROKER_ADDR, new AckMessageRequestHeader(), TIMEOUT).get());
+    }
+
+    @Test
+    public void testBatchAckMessageAsync() throws Exception {
+        AckResult ackResult = new AckResult();
+        doAnswer((Answer<Void>) mock -> {
+            AckCallback ackCallback = mock.getArgument(2);
+            ackCallback.onSuccess(ackResult);
+            return null;
+        }).when(mqClientAPI).batchAckMessageAsync(anyString(), anyLong(), any(AckCallback.class), any());
+
+        assertSame(ackResult, mqClientAPI.batchAckMessageAsync(BROKER_ADDR, TOPIC, CONSUMER_GROUP, new ArrayList<>(), TIMEOUT).get());
     }
 
     @Test
@@ -271,7 +300,7 @@ public class MQClientAPIExtTest {
             body.setConsumerIdList(clientIds);
             response.setBody(body.encode());
             responseFuture.putResponse(response);
-            invokeCallback.operationComplete(responseFuture);
+            invokeCallback.operationSucceed(responseFuture.getResponseCommand());
             return null;
         }).when(remotingClient).invokeAsync(anyString(), any(RemotingCommand.class), anyLong(), any());
 
@@ -288,7 +317,7 @@ public class MQClientAPIExtTest {
             response.setCode(ResponseCode.SYSTEM_ERROR);
             response.makeCustomHeaderToNet();
             responseFuture.putResponse(response);
-            invokeCallback.operationComplete(responseFuture);
+            invokeCallback.operationSucceed(responseFuture.getResponseCommand());
             return null;
         }).when(remotingClient).invokeAsync(anyString(), any(RemotingCommand.class), anyLong(), any());
 
@@ -308,7 +337,7 @@ public class MQClientAPIExtTest {
             response.setCode(ResponseCode.SUCCESS);
             response.makeCustomHeaderToNet();
             responseFuture.putResponse(response);
-            invokeCallback.operationComplete(responseFuture);
+            invokeCallback.operationSucceed(responseFuture.getResponseCommand());
             return null;
         }).when(remotingClient).invokeAsync(anyString(), any(RemotingCommand.class), anyLong(), any());
 
@@ -321,18 +350,15 @@ public class MQClientAPIExtTest {
     @Test
     public void testSearchOffsetAsync() throws Exception {
         long offset = ThreadLocalRandom.current().nextLong();
-        doAnswer((Answer<Void>) mock -> {
-            InvokeCallback invokeCallback = mock.getArgument(3);
-            ResponseFuture responseFuture = new ResponseFuture(null, 0, 3000, invokeCallback, null);
-            RemotingCommand response = RemotingCommand.createResponseCommand(SearchOffsetResponseHeader.class);
-            SearchOffsetResponseHeader responseHeader = (SearchOffsetResponseHeader) response.readCustomHeader();
-            responseHeader.setOffset(offset);
-            response.setCode(ResponseCode.SUCCESS);
-            response.makeCustomHeaderToNet();
-            responseFuture.putResponse(response);
-            invokeCallback.operationComplete(responseFuture);
-            return null;
-        }).when(remotingClient).invokeAsync(anyString(), any(RemotingCommand.class), anyLong(), any());
+        CompletableFuture<RemotingCommand> future = new CompletableFuture<>();
+        RemotingCommand response = RemotingCommand.createResponseCommand(SearchOffsetResponseHeader.class);
+        SearchOffsetResponseHeader responseHeader = (SearchOffsetResponseHeader) response.readCustomHeader();
+        responseHeader.setOffset(offset);
+        response.setCode(ResponseCode.SUCCESS);
+        response.makeCustomHeaderToNet();
+        future.complete(response);
+
+        doReturn(future).when(remotingClient).invoke(anyString(), any(RemotingCommand.class), anyLong());
 
         SearchOffsetRequestHeader requestHeader = new SearchOffsetRequestHeader();
         requestHeader.setTopic(TOPIC);
@@ -350,4 +376,139 @@ public class MQClientAPIExtTest {
         MessageClientIDSetter.setUniqID(messageExt);
         return messageExt;
     }
+
+    @Test
+    public void testSyncLiteSubscriptionAsync_Success() throws Exception {
+        LiteSubscriptionDTO liteSubscriptionDTO = new LiteSubscriptionDTO();
+        liteSubscriptionDTO.setTopic("test-topic");
+        liteSubscriptionDTO.setGroup("test-group");
+
+        CompletableFuture<RemotingCommand> future = new CompletableFuture<>();
+        RemotingCommand response = RemotingCommand.createResponseCommand(ResponseCode.SUCCESS, "");
+        future.complete(response);
+
+        doReturn(future).when(remotingClient).invoke(anyString(), any(RemotingCommand.class), anyLong());
+
+        CompletableFuture<Void> result = mqClientAPI.syncLiteSubscriptionAsync(BROKER_ADDR, liteSubscriptionDTO, TIMEOUT);
+
+        assertNotNull(result);
+        result.get();
+    }
+
+    @Test
+    public void testSyncLiteSubscriptionAsync_Failure() throws Exception {
+        LiteSubscriptionDTO liteSubscriptionDTO = new LiteSubscriptionDTO();
+        liteSubscriptionDTO.setTopic("test-topic");
+        liteSubscriptionDTO.setGroup("test-group");
+
+        CompletableFuture<RemotingCommand> future = new CompletableFuture<>();
+        RemotingCommand response = RemotingCommand.createResponseCommand(ResponseCode.SYSTEM_ERROR, "System error");
+        future.complete(response);
+
+        doReturn(future).when(remotingClient).invoke(anyString(), any(RemotingCommand.class), anyLong());
+
+        CompletableFuture<Void> result = mqClientAPI.syncLiteSubscriptionAsync(BROKER_ADDR, liteSubscriptionDTO, TIMEOUT);
+
+        assertNotNull(result);
+        assertTrue(result.isCompletedExceptionally());
+
+        try {
+            result.get();
+        } catch (Exception e) {
+            assertTrue(e.getCause() instanceof MQBrokerException);
+            MQBrokerException brokerException = (MQBrokerException) e.getCause();
+            assertEquals(ResponseCode.SYSTEM_ERROR, brokerException.getResponseCode());
+        }
+    }
+
+    @Test
+    public void testSyncLiteSubscriptionAsync_Exception() throws Exception {
+        LiteSubscriptionDTO liteSubscriptionDTO = new LiteSubscriptionDTO();
+        liteSubscriptionDTO.setTopic("test-topic");
+        liteSubscriptionDTO.setGroup("test-group");
+
+        CompletableFuture<RemotingCommand> future = new CompletableFuture<>();
+        future.completeExceptionally(new RuntimeException("Network error"));
+
+        doReturn(future).when(remotingClient).invoke(anyString(), any(RemotingCommand.class), anyLong());
+
+        CompletableFuture<Void> result = mqClientAPI.syncLiteSubscriptionAsync(BROKER_ADDR, liteSubscriptionDTO, TIMEOUT);
+
+        assertNotNull(result);
+        assertTrue(result.isCompletedExceptionally());
+
+        try {
+            result.get();
+        } catch (Exception e) {
+            assertTrue(e.getCause() instanceof RuntimeException);
+            assertEquals("Network error", e.getCause().getMessage());
+        }
+    }
+
+    @Test
+    public void testSyncLiteSubscriptionAsync_EmptySubscription() throws Exception {
+        LiteSubscriptionDTO liteSubscriptionDTO = new LiteSubscriptionDTO();
+
+        CompletableFuture<RemotingCommand> future = new CompletableFuture<>();
+        RemotingCommand response = RemotingCommand.createResponseCommand(ResponseCode.SUCCESS, "");
+        future.complete(response);
+
+        doReturn(future).when(remotingClient).invoke(anyString(), any(RemotingCommand.class), anyLong());
+
+        CompletableFuture<Void> result = mqClientAPI.syncLiteSubscriptionAsync(BROKER_ADDR, liteSubscriptionDTO, TIMEOUT);
+
+        assertNotNull(result);
+        result.get();
+    }
+
+    @Test
+    public void testGetLiteTopicInfoAsync_Success() throws Exception {
+        String parentTopic = "parentTopic";
+        String liteTopic = "liteTopic";
+
+        GetLiteTopicInfoResponseBody responseBody = new GetLiteTopicInfoResponseBody();
+        responseBody.setLiteTopic(liteTopic);
+        responseBody.setParentTopic(parentTopic);
+
+        CompletableFuture<RemotingCommand> future = new CompletableFuture<>();
+        RemotingCommand response = RemotingCommand.createResponseCommand(ResponseCode.SUCCESS, "");
+        response.setBody(responseBody.encode());
+        future.complete(response);
+
+        doReturn(future).when(remotingClient).invoke(anyString(), any(RemotingCommand.class), anyLong());
+
+        CompletableFuture<GetLiteTopicInfoResponseBody> result =
+            mqClientAPI.getLiteTopicInfoAsync(BROKER_ADDR, parentTopic, liteTopic, TIMEOUT);
+
+        assertNotNull(result);
+        GetLiteTopicInfoResponseBody actualBody = result.get();
+        assertNotNull(actualBody);
+        assertEquals(liteTopic, actualBody.getLiteTopic());
+        assertEquals(parentTopic, actualBody.getParentTopic());
+    }
+
+    @Test
+    public void testGetLiteTopicInfoAsync_Failure() throws Exception {
+        String parentTopic = "parentTopic";
+        String liteTopic = "liteTopic";
+
+        CompletableFuture<RemotingCommand> future = new CompletableFuture<>();
+        RemotingCommand response = RemotingCommand.createResponseCommand(ResponseCode.SYSTEM_ERROR, "System error");
+        future.complete(response);
+
+        doReturn(future).when(remotingClient).invoke(anyString(), any(RemotingCommand.class), anyLong());
+
+        CompletableFuture<GetLiteTopicInfoResponseBody> result =
+            mqClientAPI.getLiteTopicInfoAsync(BROKER_ADDR, parentTopic, liteTopic, TIMEOUT);
+
+        assertNotNull(result);
+        assertTrue(result.isCompletedExceptionally());
+
+        try {
+            result.get();
+        } catch (Exception e) {
+            assertTrue(e.getCause() instanceof MQBrokerException);
+        }
+    }
+
 }

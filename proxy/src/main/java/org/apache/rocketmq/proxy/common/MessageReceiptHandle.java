@@ -29,16 +29,23 @@ public class MessageReceiptHandle {
     private final String messageId;
     private final long queueOffset;
     private final String originalReceiptHandleStr;
+    private final ReceiptHandle originalReceiptHandle;
     private final int reconsumeTimes;
 
     private final AtomicInteger renewRetryTimes = new AtomicInteger(0);
     private final AtomicInteger renewTimes = new AtomicInteger(0);
     private final long consumeTimestamp;
+    private String liteTopic;
     private volatile String receiptHandleStr;
 
     public MessageReceiptHandle(String group, String topic, int queueId, String receiptHandleStr, String messageId,
         long queueOffset, int reconsumeTimes) {
-        ReceiptHandle receiptHandle = ReceiptHandle.decode(receiptHandleStr);
+        this(group, topic, queueId, receiptHandleStr, messageId, queueOffset, reconsumeTimes, null);
+    }
+
+    public MessageReceiptHandle(String group, String topic, int queueId, String receiptHandleStr, String messageId,
+        long queueOffset, int reconsumeTimes, String liteTopic) {
+        this.originalReceiptHandle = ReceiptHandle.decode(receiptHandleStr);
         this.group = group;
         this.topic = topic;
         this.queueId = queueId;
@@ -47,7 +54,8 @@ public class MessageReceiptHandle {
         this.messageId = messageId;
         this.queueOffset = queueOffset;
         this.reconsumeTimes = reconsumeTimes;
-        this.consumeTimestamp = receiptHandle.getRetrieveTime();
+        this.consumeTimestamp = originalReceiptHandle.getRetrieveTime();
+        this.liteTopic = liteTopic;
     }
 
     @Override
@@ -85,6 +93,8 @@ public class MessageReceiptHandle {
             .add("renewRetryTimes", renewRetryTimes)
             .add("firstConsumeTimestamp", consumeTimestamp)
             .add("receiptHandleStr", receiptHandleStr)
+            .add("liteTopic", liteTopic)
+            .omitNullValues()
             .toString();
     }
 
@@ -148,4 +158,15 @@ public class MessageReceiptHandle {
         return this.renewRetryTimes.get();
     }
 
+    public ReceiptHandle getOriginalReceiptHandle() {
+        return originalReceiptHandle;
+    }
+
+    public String getLiteTopic() {
+        return liteTopic;
+    }
+
+    public void setLiteTopic(String liteTopic) {
+        this.liteTopic = liteTopic;
+    }
 }

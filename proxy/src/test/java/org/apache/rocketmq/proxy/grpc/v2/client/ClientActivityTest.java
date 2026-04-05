@@ -23,6 +23,7 @@ import apache.rocketmq.v2.FilterExpression;
 import apache.rocketmq.v2.FilterType;
 import apache.rocketmq.v2.HeartbeatRequest;
 import apache.rocketmq.v2.HeartbeatResponse;
+import apache.rocketmq.v2.LiteSubscriptionAction;
 import apache.rocketmq.v2.NotifyClientTerminationRequest;
 import apache.rocketmq.v2.NotifyClientTerminationResponse;
 import apache.rocketmq.v2.Publishing;
@@ -30,6 +31,8 @@ import apache.rocketmq.v2.Resource;
 import apache.rocketmq.v2.Settings;
 import apache.rocketmq.v2.Subscription;
 import apache.rocketmq.v2.SubscriptionEntry;
+import apache.rocketmq.v2.SyncLiteSubscriptionRequest;
+import apache.rocketmq.v2.SyncLiteSubscriptionResponse;
 import apache.rocketmq.v2.TelemetryCommand;
 import apache.rocketmq.v2.ThreadStackTrace;
 import apache.rocketmq.v2.VerifyMessageResult;
@@ -41,10 +44,13 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import org.apache.rocketmq.broker.client.ClientChannelInfo;
 import org.apache.rocketmq.common.attribute.TopicMessageType;
+import org.apache.rocketmq.common.lite.LiteSubscriptionDTO;
 import org.apache.rocketmq.proxy.common.ProxyContext;
 import org.apache.rocketmq.proxy.grpc.v2.BaseActivityTest;
+import org.apache.rocketmq.proxy.grpc.v2.ContextStreamObserver;
 import org.apache.rocketmq.proxy.grpc.v2.channel.GrpcChannelManager;
 import org.apache.rocketmq.proxy.grpc.v2.channel.GrpcClientChannel;
+import org.apache.rocketmq.proxy.grpc.v2.common.GrpcValidator;
 import org.apache.rocketmq.proxy.grpc.v2.common.ResponseBuilder;
 import org.apache.rocketmq.proxy.service.relay.ProxyRelayResult;
 import org.apache.rocketmq.remoting.protocol.LanguageCode;
@@ -60,6 +66,7 @@ import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Captor;
 import org.mockito.Mock;
+import org.mockito.MockedStatic;
 import org.mockito.junit.MockitoJUnitRunner;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -68,8 +75,12 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -134,7 +145,7 @@ public class ClientActivityTest extends BaseActivityTest {
             txProducerTopicArgumentCaptor.capture()
         );
 
-        when(this.metadataService.getTopicMessageType(anyString())).thenReturn(TopicMessageType.TRANSACTION);
+        when(this.metadataService.getTopicMessageType(any(), anyString())).thenReturn(TopicMessageType.TRANSACTION);
 
         HeartbeatResponse response = this.sendProducerHeartbeat(context);
 
@@ -222,7 +233,7 @@ public class ClientActivityTest extends BaseActivityTest {
             .build());
         ArgumentCaptor<ClientChannelInfo> channelInfoArgumentCaptor = ArgumentCaptor.forClass(ClientChannelInfo.class);
         doNothing().when(this.messagingProcessor).unRegisterProducer(any(), anyString(), channelInfoArgumentCaptor.capture());
-        when(this.metadataService.getTopicMessageType(anyString())).thenReturn(TopicMessageType.NORMAL);
+        when(this.metadataService.getTopicMessageType(any(), anyString())).thenReturn(TopicMessageType.NORMAL);
 
         this.sendProducerTelemetry(context);
         this.sendProducerHeartbeat(context);
@@ -341,7 +352,7 @@ public class ClientActivityTest extends BaseActivityTest {
         String nonce = "123";
         when(grpcChannelManagerMock.getAndRemoveResponseFuture(anyString())).thenReturn((CompletableFuture) runningInfoFutureMock);
         ProxyContext context = createContext();
-        StreamObserver<TelemetryCommand> streamObserver = clientActivity.telemetry(context, new StreamObserver<TelemetryCommand>() {
+        ContextStreamObserver<TelemetryCommand> streamObserver = clientActivity.telemetry(new StreamObserver<TelemetryCommand>() {
             @Override
             public void onNext(TelemetryCommand value) {
             }
@@ -354,7 +365,7 @@ public class ClientActivityTest extends BaseActivityTest {
             public void onCompleted() {
             }
         });
-        streamObserver.onNext(TelemetryCommand.newBuilder()
+        streamObserver.onNext(context, TelemetryCommand.newBuilder()
             .setThreadStackTrace(ThreadStackTrace.newBuilder()
                 .setThreadStackTrace(jstack)
                 .setNonce(nonce)
@@ -373,7 +384,7 @@ public class ClientActivityTest extends BaseActivityTest {
         String nonce = "123";
         when(grpcChannelManagerMock.getAndRemoveResponseFuture(anyString())).thenReturn((CompletableFuture) resultFutureMock);
         ProxyContext context = createContext();
-        StreamObserver<TelemetryCommand> streamObserver = clientActivity.telemetry(context, new StreamObserver<TelemetryCommand>() {
+        ContextStreamObserver<TelemetryCommand> streamObserver = clientActivity.telemetry(new StreamObserver<TelemetryCommand>() {
             @Override
             public void onNext(TelemetryCommand value) {
             }
@@ -386,7 +397,7 @@ public class ClientActivityTest extends BaseActivityTest {
             public void onCompleted() {
             }
         });
-        streamObserver.onNext(TelemetryCommand.newBuilder()
+        streamObserver.onNext(context, TelemetryCommand.newBuilder()
             .setVerifyMessageResult(VerifyMessageResult.newBuilder()
                 .setNonce(nonce)
                 .build())
@@ -418,13 +429,104 @@ public class ClientActivityTest extends BaseActivityTest {
 
             }
         };
-        StreamObserver<TelemetryCommand> requestObserver = this.clientActivity.telemetry(
-            ctx,
-            responseObserver
-        );
-        requestObserver.onNext(TelemetryCommand.newBuilder()
+        ContextStreamObserver<TelemetryCommand> requestObserver = this.clientActivity.telemetry(responseObserver);
+        requestObserver.onNext(ctx, TelemetryCommand.newBuilder()
             .setSettings(settings)
             .build());
         return future;
+    }
+
+    @Test
+    public void testSyncLiteSubscription_Success() {
+        ProxyContext proxyContext = createContext();
+        proxyContext.setClientID("client-id");
+        Resource topic = Resource.newBuilder().setName("test-topic").build();
+        Resource group = Resource.newBuilder().setName("test-group").build();
+        SyncLiteSubscriptionRequest request = SyncLiteSubscriptionRequest.newBuilder()
+            .setTopic(topic)
+            .setGroup(group)
+            .setAction(LiteSubscriptionAction.PARTIAL_ADD)
+            .addAllLiteTopicSet(java.util.Collections.emptyList())
+            .setVersion(1L)
+            .build();
+
+        when(messagingProcessor.syncLiteSubscription(any(), any(LiteSubscriptionDTO.class), anyLong()))
+            .thenReturn(CompletableFuture.completedFuture(null));
+
+        CompletableFuture<SyncLiteSubscriptionResponse> future = clientActivity.syncLiteSubscription(proxyContext, request);
+
+        SyncLiteSubscriptionResponse response = future.join();
+        assertEquals(Code.OK, response.getStatus().getCode());
+    }
+
+    @Test
+    public void testSyncLiteSubscription_ValidationFailure() {
+        ProxyContext proxyContext = createContext();
+        Resource topic = Resource.newBuilder().setName("test-topic").build();
+        Resource group = Resource.newBuilder().setName("test-group").build();
+        SyncLiteSubscriptionRequest request = SyncLiteSubscriptionRequest.newBuilder()
+            .setTopic(topic)
+            .setGroup(group)
+            .build();
+
+        // Mock the GrpcValidator singleton
+        GrpcValidator mockValidator = mock(GrpcValidator.class);
+        try (MockedStatic<GrpcValidator> mocked = mockStatic(GrpcValidator.class)) {
+            mocked.when(GrpcValidator::getInstance).thenReturn(mockValidator);
+
+            doThrow(new IllegalArgumentException("Invalid topic"))
+                .when(mockValidator).validateTopicAndConsumerGroup(topic, group);
+
+            CompletableFuture<SyncLiteSubscriptionResponse> future = clientActivity.syncLiteSubscription(proxyContext, request);
+
+            assertTrue(future.isCompletedExceptionally());
+        }
+    }
+
+    @Test
+    public void testSyncLiteSubscription_ProcessingFailure() {
+        ProxyContext proxyContext = createContext();
+        proxyContext.setClientID("client-id");
+        Resource topic = Resource.newBuilder().setName("test-topic").build();
+        Resource group = Resource.newBuilder().setName("test-group").build();
+        SyncLiteSubscriptionRequest request = SyncLiteSubscriptionRequest.newBuilder()
+            .setTopic(topic)
+            .setGroup(group)
+            .setAction(LiteSubscriptionAction.PARTIAL_ADD)
+            .addAllLiteTopicSet(java.util.Collections.emptyList())
+            .setVersion(1L)
+            .build();
+
+        CompletableFuture<Void> failedFuture = new CompletableFuture<>();
+        failedFuture.completeExceptionally(new RuntimeException("Processing failed"));
+        when(messagingProcessor.syncLiteSubscription(any(), any(LiteSubscriptionDTO.class), anyLong()))
+            .thenReturn(failedFuture);
+
+        CompletableFuture<SyncLiteSubscriptionResponse> future = clientActivity.syncLiteSubscription(proxyContext, request);
+
+        assertTrue(future.isCompletedExceptionally());
+    }
+
+    @Test
+    public void testSyncLiteSubscription_NullContext() {
+        Resource topic = Resource.newBuilder().setName("test-topic").build();
+        Resource group = Resource.newBuilder().setName("test-group").build();
+        SyncLiteSubscriptionRequest request = SyncLiteSubscriptionRequest.newBuilder()
+            .setTopic(topic)
+            .setGroup(group)
+            .build();
+
+        CompletableFuture<SyncLiteSubscriptionResponse> future = clientActivity.syncLiteSubscription(null, request);
+
+        assertTrue(future.isCompletedExceptionally());
+    }
+
+    @Test
+    public void testSyncLiteSubscription_NullRequest() {
+        ProxyContext proxyContext = createContext();
+
+        CompletableFuture<SyncLiteSubscriptionResponse> future = clientActivity.syncLiteSubscription(proxyContext, null);
+
+        assertTrue(future.isCompletedExceptionally());
     }
 }

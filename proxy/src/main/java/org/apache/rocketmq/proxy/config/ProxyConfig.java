@@ -24,13 +24,13 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.rocketmq.common.BrokerConfig;
 import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.constant.LoggerName;
+import org.apache.rocketmq.common.metrics.MetricsExporterType;
 import org.apache.rocketmq.common.utils.NetworkUtil;
 import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
@@ -81,17 +81,31 @@ public class ProxyConfig implements ConfigFile {
      */
     private boolean tlsTestModeEnable = true;
     private String tlsKeyPath = ConfigurationManager.getProxyHome() + "/conf/tls/rocketmq.key";
+    private String tlsKeyPassword = "";
     private String tlsCertPath = ConfigurationManager.getProxyHome() + "/conf/tls/rocketmq.crt";
+    private int tlsCertWatchIntervalMs = 60 * 60 * 1000; // 1 hour
     /**
      * gRPC
      */
     private String proxyMode = ProxyMode.CLUSTER.name();
     private Integer grpcServerPort = 8081;
+    private long grpcShutdownTimeSeconds = 30;
     private int grpcBossLoopNum = 1;
     private int grpcWorkerLoopNum = PROCESSOR_NUMBER * 2;
     private boolean enableGrpcEpoll = false;
     private int grpcThreadPoolNums = 16 + PROCESSOR_NUMBER * 2;
     private int grpcThreadPoolQueueCapacity = 100000;
+
+    /**
+     * Maximum number of concurrent gRPC calls allowed per client connection.
+     * <p>
+     * A single client issuing excessively high concurrent requests may skew the validation load balancing
+     * and overload a single proxy instance (hotspot), potentially bringing it down. Limiting
+     * {@code grpcMaxConcurrentCallsPerConnection} helps mitigate this per-connection hotspot risk.
+     * <p>
+     * Note: Setting this limit too low may cause send/consume failures (e.g., backpressure or rejected calls).
+     */
+    private int grpcMaxConcurrentCallsPerConnection = Integer.MAX_VALUE;
     private String brokerConfigPath = ConfigurationManager.getProxyHome() + "/conf/broker.conf";
     /**
      * gRPC max message size
@@ -103,6 +117,10 @@ public class ProxyConfig implements ConfigFile {
      */
     private int maxMessageSize = 4 * 1024 * 1024;
     /**
+     * if true, proxy will check message body size and reject msg if it's body is empty
+     */
+    private boolean enableMessageBodyEmptyCheck = true;
+    /**
      * max user property size, 0 or negative number means no limit for proxy
      */
     private int maxUserPropertySize = 16 * 1024;
@@ -112,6 +130,13 @@ public class ProxyConfig implements ConfigFile {
      * max message group size, 0 or negative number means no limit for proxy
      */
     private int maxMessageGroupSize = 64;
+    /**
+     * max lite topic size
+     */
+    private int maxLiteTopicSize = 64;
+    private int maxLiteRenewNumPerChannel = 100;
+    // syncLiteSubscription request rate limit per proxy
+    private int maxSyncLiteSubscriptionRate = 5000;
 
     /**
      * When a message pops, the message is invisible by default
@@ -155,17 +180,26 @@ public class ProxyConfig implements ConfigFile {
     private int consumerProcessorThreadPoolQueueCapacity = 10000;
 
     private boolean useEndpointPortFromRequest = false;
-    private int topicRouteServiceCacheExpiredInSeconds = 20;
+
+    private int topicRouteServiceCacheExpiredSeconds = 300;
+    private int topicRouteServiceCacheRefreshSeconds = 20;
     private int topicRouteServiceCacheMaxNum = 20000;
     private int topicRouteServiceThreadPoolNums = PROCESSOR_NUMBER;
     private int topicRouteServiceThreadPoolQueueCapacity = 5000;
-
-    private int topicConfigCacheExpiredInSeconds = 20;
+    private int topicConfigCacheExpiredSeconds = 300;
+    private int topicConfigCacheRefreshSeconds = 20;
     private int topicConfigCacheMaxNum = 20000;
-    private int subscriptionGroupConfigCacheExpiredInSeconds = 20;
+    private int subscriptionGroupConfigCacheExpiredSeconds = 300;
+    private int subscriptionGroupConfigCacheRefreshSeconds = 20;
     private int subscriptionGroupConfigCacheMaxNum = 20000;
+    private int userCacheExpiredSeconds = 300;
+    private int userCacheRefreshSeconds = 20;
+    private int userCacheMaxNum = 20000;
+    private int aclCacheExpiredSeconds = 300;
+    private int aclCacheRefreshSeconds = 20;
+    private int aclCacheMaxNum = 20000;
     private int metadataThreadPoolNums = 3;
-    private int metadataThreadPoolQueueCapacity = 1000;
+    private int metadataThreadPoolQueueCapacity = 100000;
 
     private int transactionHeartbeatThreadPoolNums = 20;
     private int transactionHeartbeatThreadPoolQueueCapacity = 200;
@@ -188,14 +222,13 @@ public class ProxyConfig implements ConfigFile {
     private long renewAheadTimeMillis = TimeUnit.SECONDS.toMillis(10);
     private long renewMaxTimeMillis = TimeUnit.HOURS.toMillis(3);
     private long renewSchedulePeriodMillis = TimeUnit.SECONDS.toMillis(5);
-
-    private boolean enableACL = false;
+    private int returnHandleGroupThreadPoolNums = 2;
 
     private boolean enableAclRpcHookForClusterMode = false;
 
     private boolean useDelayLevel = false;
     private String messageDelayLevel = "1s 5s 10s 30s 1m 2m 3m 4m 5m 6m 7m 8m 9m 10m 20m 30m 1h 2h";
-    private transient Map<Integer /* level */, Long/* delay timeMillis */> delayLevelTable = new ConcurrentHashMap<>();
+    private transient ConcurrentSkipListMap<Integer /* level */, Long/* delay timeMillis */> delayLevelTable = new ConcurrentSkipListMap<>();
 
     private String metricCollectorMode = MetricCollectorMode.OFF.getModeString();
     // Example address: 127.0.0.1:1234
@@ -205,7 +238,7 @@ public class ProxyConfig implements ConfigFile {
 
     private boolean traceOn = false;
 
-    private BrokerConfig.MetricsExporterType metricsExporterType = BrokerConfig.MetricsExporterType.DISABLE;
+    private MetricsExporterType metricsExporterType = MetricsExporterType.DISABLE;
 
     private String metricsGrpcExporterTarget = "";
     private String metricsGrpcExporterHeader = "";
@@ -229,6 +262,12 @@ public class ProxyConfig implements ConfigFile {
     private String remotingAccessAddr = "";
     private int remotingListenPort = 8080;
 
+    // related to proxy's send strategy in cluster mode.
+    private boolean sendLatencyEnable = false;
+    private boolean startDetectorEnable = false;
+    private int detectTimeout = 200;
+    private int detectInterval = 2 * 1000;
+
     private int remotingHeartbeatThreadPoolNums = 2 * PROCESSOR_NUMBER;
     private int remotingTopicRouteThreadPoolNums = 2 * PROCESSOR_NUMBER;
     private int remotingSendMessageThreadPoolNums = 4 * PROCESSOR_NUMBER;
@@ -249,6 +288,8 @@ public class ProxyConfig implements ConfigFile {
     private long remotingWaitTimeMillsInUpdateOffsetQueue = 3 * 1000;
     private long remotingWaitTimeMillsInTopicRouteQueue = 3 * 1000;
     private long remotingWaitTimeMillsInDefaultQueue = 3 * 1000;
+
+    private boolean enableBatchAck = false;
 
     @Override
     public void initData() {
@@ -279,7 +320,7 @@ public class ProxyConfig implements ConfigFile {
     }
 
     public void parseDelayLevel() {
-        this.delayLevelTable = new ConcurrentHashMap<>();
+        this.delayLevelTable = new ConcurrentSkipListMap<>();
         Map<String, Long> timeUnitTable = new HashMap<>();
         timeUnitTable.put("s", 1000L);
         timeUnitTable.put("m", 1000L * 60);
@@ -302,6 +343,14 @@ public class ProxyConfig implements ConfigFile {
         } catch (Exception e) {
             log.error("parse delay level failed. messageDelayLevel:{}", messageDelayLevel, e);
         }
+    }
+
+    public int getTlsCertWatchIntervalMs() {
+        return tlsCertWatchIntervalMs;
+    }
+
+    public void setTlsCertWatchIntervalMs(int tlsCertWatchIntervalMs) {
+        this.tlsCertWatchIntervalMs = tlsCertWatchIntervalMs;
     }
 
     public String getRocketMQClusterName() {
@@ -432,6 +481,14 @@ public class ProxyConfig implements ConfigFile {
         this.grpcServerPort = grpcServerPort;
     }
 
+    public long getGrpcShutdownTimeSeconds() {
+        return grpcShutdownTimeSeconds;
+    }
+
+    public void setGrpcShutdownTimeSeconds(long grpcShutdownTimeSeconds) {
+        this.grpcShutdownTimeSeconds = grpcShutdownTimeSeconds;
+    }
+
     public boolean isUseEndpointPortFromRequest() {
         return useEndpointPortFromRequest;
     }
@@ -454,6 +511,14 @@ public class ProxyConfig implements ConfigFile {
 
     public void setTlsKeyPath(String tlsKeyPath) {
         this.tlsKeyPath = tlsKeyPath;
+    }
+
+    public String getTlsKeyPassword() {
+        return tlsKeyPassword;
+    }
+
+    public void setTlsKeyPassword(String tlsKeyPassword) {
+        this.tlsKeyPassword = tlsKeyPassword;
     }
 
     public String getTlsCertPath() {
@@ -792,12 +857,20 @@ public class ProxyConfig implements ConfigFile {
         this.consumerProcessorThreadPoolQueueCapacity = consumerProcessorThreadPoolQueueCapacity;
     }
 
-    public int getTopicRouteServiceCacheExpiredInSeconds() {
-        return topicRouteServiceCacheExpiredInSeconds;
+    public int getTopicRouteServiceCacheExpiredSeconds() {
+        return topicRouteServiceCacheExpiredSeconds;
     }
 
-    public void setTopicRouteServiceCacheExpiredInSeconds(int topicRouteServiceCacheExpiredInSeconds) {
-        this.topicRouteServiceCacheExpiredInSeconds = topicRouteServiceCacheExpiredInSeconds;
+    public void setTopicRouteServiceCacheExpiredSeconds(int topicRouteServiceCacheExpiredSeconds) {
+        this.topicRouteServiceCacheExpiredSeconds = topicRouteServiceCacheExpiredSeconds;
+    }
+
+    public int getTopicRouteServiceCacheRefreshSeconds() {
+        return topicRouteServiceCacheRefreshSeconds;
+    }
+
+    public void setTopicRouteServiceCacheRefreshSeconds(int topicRouteServiceCacheRefreshSeconds) {
+        this.topicRouteServiceCacheRefreshSeconds = topicRouteServiceCacheRefreshSeconds;
     }
 
     public int getTopicRouteServiceCacheMaxNum() {
@@ -824,12 +897,20 @@ public class ProxyConfig implements ConfigFile {
         this.topicRouteServiceThreadPoolQueueCapacity = topicRouteServiceThreadPoolQueueCapacity;
     }
 
-    public int getTopicConfigCacheExpiredInSeconds() {
-        return topicConfigCacheExpiredInSeconds;
+    public int getTopicConfigCacheRefreshSeconds() {
+        return topicConfigCacheRefreshSeconds;
     }
 
-    public void setTopicConfigCacheExpiredInSeconds(int topicConfigCacheExpiredInSeconds) {
-        this.topicConfigCacheExpiredInSeconds = topicConfigCacheExpiredInSeconds;
+    public void setTopicConfigCacheRefreshSeconds(int topicConfigCacheRefreshSeconds) {
+        this.topicConfigCacheRefreshSeconds = topicConfigCacheRefreshSeconds;
+    }
+
+    public int getTopicConfigCacheExpiredSeconds() {
+        return topicConfigCacheExpiredSeconds;
+    }
+
+    public void setTopicConfigCacheExpiredSeconds(int topicConfigCacheExpiredSeconds) {
+        this.topicConfigCacheExpiredSeconds = topicConfigCacheExpiredSeconds;
     }
 
     public int getTopicConfigCacheMaxNum() {
@@ -840,12 +921,20 @@ public class ProxyConfig implements ConfigFile {
         this.topicConfigCacheMaxNum = topicConfigCacheMaxNum;
     }
 
-    public int getSubscriptionGroupConfigCacheExpiredInSeconds() {
-        return subscriptionGroupConfigCacheExpiredInSeconds;
+    public int getSubscriptionGroupConfigCacheRefreshSeconds() {
+        return subscriptionGroupConfigCacheRefreshSeconds;
     }
 
-    public void setSubscriptionGroupConfigCacheExpiredInSeconds(int subscriptionGroupConfigCacheExpiredInSeconds) {
-        this.subscriptionGroupConfigCacheExpiredInSeconds = subscriptionGroupConfigCacheExpiredInSeconds;
+    public void setSubscriptionGroupConfigCacheRefreshSeconds(int subscriptionGroupConfigCacheRefreshSeconds) {
+        this.subscriptionGroupConfigCacheRefreshSeconds = subscriptionGroupConfigCacheRefreshSeconds;
+    }
+
+    public int getSubscriptionGroupConfigCacheExpiredSeconds() {
+        return subscriptionGroupConfigCacheExpiredSeconds;
+    }
+
+    public void setSubscriptionGroupConfigCacheExpiredSeconds(int subscriptionGroupConfigCacheExpiredSeconds) {
+        this.subscriptionGroupConfigCacheExpiredSeconds = subscriptionGroupConfigCacheExpiredSeconds;
     }
 
     public int getSubscriptionGroupConfigCacheMaxNum() {
@@ -854,6 +943,54 @@ public class ProxyConfig implements ConfigFile {
 
     public void setSubscriptionGroupConfigCacheMaxNum(int subscriptionGroupConfigCacheMaxNum) {
         this.subscriptionGroupConfigCacheMaxNum = subscriptionGroupConfigCacheMaxNum;
+    }
+
+    public int getUserCacheExpiredSeconds() {
+        return userCacheExpiredSeconds;
+    }
+
+    public void setUserCacheExpiredSeconds(int userCacheExpiredSeconds) {
+        this.userCacheExpiredSeconds = userCacheExpiredSeconds;
+    }
+
+    public int getUserCacheRefreshSeconds() {
+        return userCacheRefreshSeconds;
+    }
+
+    public void setUserCacheRefreshSeconds(int userCacheRefreshSeconds) {
+        this.userCacheRefreshSeconds = userCacheRefreshSeconds;
+    }
+
+    public int getUserCacheMaxNum() {
+        return userCacheMaxNum;
+    }
+
+    public void setUserCacheMaxNum(int userCacheMaxNum) {
+        this.userCacheMaxNum = userCacheMaxNum;
+    }
+
+    public int getAclCacheExpiredSeconds() {
+        return aclCacheExpiredSeconds;
+    }
+
+    public void setAclCacheExpiredSeconds(int aclCacheExpiredSeconds) {
+        this.aclCacheExpiredSeconds = aclCacheExpiredSeconds;
+    }
+
+    public int getAclCacheRefreshSeconds() {
+        return aclCacheRefreshSeconds;
+    }
+
+    public void setAclCacheRefreshSeconds(int aclCacheRefreshSeconds) {
+        this.aclCacheRefreshSeconds = aclCacheRefreshSeconds;
+    }
+
+    public int getAclCacheMaxNum() {
+        return aclCacheMaxNum;
+    }
+
+    public void setAclCacheMaxNum(int aclCacheMaxNum) {
+        this.aclCacheMaxNum = aclCacheMaxNum;
     }
 
     public int getMetadataThreadPoolNums() {
@@ -942,14 +1079,6 @@ public class ProxyConfig implements ConfigFile {
 
     public void setLongPollingReserveTimeInMillis(long longPollingReserveTimeInMillis) {
         this.longPollingReserveTimeInMillis = longPollingReserveTimeInMillis;
-    }
-
-    public boolean isEnableACL() {
-        return enableACL;
-    }
-
-    public void setEnableACL(boolean enableACL) {
-        this.enableACL = enableACL;
     }
 
     public boolean isEnableAclRpcHookForClusterMode() {
@@ -1080,7 +1209,7 @@ public class ProxyConfig implements ConfigFile {
         this.messageDelayLevel = messageDelayLevel;
     }
 
-    public Map<Integer, Long> getDelayLevelTable() {
+    public ConcurrentSkipListMap<Integer, Long> getDelayLevelTable() {
         return delayLevelTable;
     }
 
@@ -1116,20 +1245,16 @@ public class ProxyConfig implements ConfigFile {
         this.remotingAccessAddr = remotingAccessAddr;
     }
 
-    public BrokerConfig.MetricsExporterType getMetricsExporterType() {
+    public MetricsExporterType getMetricsExporterType() {
         return metricsExporterType;
     }
 
-    public void setMetricsExporterType(BrokerConfig.MetricsExporterType metricsExporterType) {
+    public void setMetricsExporterType(MetricsExporterType metricsExporterType) {
         this.metricsExporterType = metricsExporterType;
     }
 
-    public void setMetricsExporterType(int metricsExporterType) {
-        this.metricsExporterType = BrokerConfig.MetricsExporterType.valueOf(metricsExporterType);
-    }
-
     public void setMetricsExporterType(String metricsExporterType) {
-        this.metricsExporterType = BrokerConfig.MetricsExporterType.valueOf(metricsExporterType);
+        this.metricsExporterType = MetricsExporterType.valueOf(metricsExporterType);
     }
 
     public String getMetricsGrpcExporterTarget() {
@@ -1378,5 +1503,101 @@ public class ProxyConfig implements ConfigFile {
 
     public void setRemotingWaitTimeMillsInDefaultQueue(long remotingWaitTimeMillsInDefaultQueue) {
         this.remotingWaitTimeMillsInDefaultQueue = remotingWaitTimeMillsInDefaultQueue;
+    }
+
+    public boolean isSendLatencyEnable() {
+        return sendLatencyEnable;
+    }
+
+    public boolean isStartDetectorEnable() {
+        return startDetectorEnable;
+    }
+
+    public void setStartDetectorEnable(boolean startDetectorEnable) {
+        this.startDetectorEnable = startDetectorEnable;
+    }
+
+    public void setSendLatencyEnable(boolean sendLatencyEnable) {
+        this.sendLatencyEnable = sendLatencyEnable;
+    }
+
+    public boolean getStartDetectorEnable() {
+        return this.startDetectorEnable;
+    }
+
+    public boolean getSendLatencyEnable() {
+        return this.sendLatencyEnable;
+    }
+
+    public int getDetectTimeout() {
+        return detectTimeout;
+    }
+
+    public void setDetectTimeout(int detectTimeout) {
+        this.detectTimeout = detectTimeout;
+    }
+
+    public int getDetectInterval() {
+        return detectInterval;
+    }
+
+    public void setDetectInterval(int detectInterval) {
+        this.detectInterval = detectInterval;
+    }
+
+    public boolean isEnableBatchAck() {
+        return enableBatchAck;
+    }
+
+    public void setEnableBatchAck(boolean enableBatchAck) {
+        this.enableBatchAck = enableBatchAck;
+    }
+
+    public boolean isEnableMessageBodyEmptyCheck() {
+        return enableMessageBodyEmptyCheck;
+    }
+
+    public void setEnableMessageBodyEmptyCheck(boolean enableMessageBodyEmptyCheck) {
+        this.enableMessageBodyEmptyCheck = enableMessageBodyEmptyCheck;
+    }
+
+    public int getMaxLiteTopicSize() {
+        return maxLiteTopicSize;
+    }
+
+    public void setMaxLiteTopicSize(int maxLiteTopicSize) {
+        this.maxLiteTopicSize = maxLiteTopicSize;
+    }
+
+    public int getMaxLiteRenewNumPerChannel() {
+        return maxLiteRenewNumPerChannel;
+    }
+
+    public void setMaxLiteRenewNumPerChannel(int maxLiteRenewNumPerChannel) {
+        this.maxLiteRenewNumPerChannel = maxLiteRenewNumPerChannel;
+    }
+
+    public int getMaxSyncLiteSubscriptionRate() {
+        return maxSyncLiteSubscriptionRate;
+    }
+
+    public void setMaxSyncLiteSubscriptionRate(int maxSyncLiteSubscriptionRate) {
+        this.maxSyncLiteSubscriptionRate = maxSyncLiteSubscriptionRate;
+    }
+
+    public int getReturnHandleGroupThreadPoolNums() {
+        return returnHandleGroupThreadPoolNums;
+    }
+
+    public void setReturnHandleGroupThreadPoolNums(int returnHandleGroupThreadPoolNums) {
+        this.returnHandleGroupThreadPoolNums = returnHandleGroupThreadPoolNums;
+    }
+
+    public int getGrpcMaxConcurrentCallsPerConnection() {
+        return grpcMaxConcurrentCallsPerConnection;
+    }
+
+    public void setGrpcMaxConcurrentCallsPerConnection(int grpcMaxConcurrentCallsPerConnection) {
+        this.grpcMaxConcurrentCallsPerConnection = grpcMaxConcurrentCallsPerConnection;
     }
 }

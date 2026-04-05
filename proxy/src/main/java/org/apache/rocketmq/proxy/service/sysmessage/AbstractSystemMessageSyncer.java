@@ -17,45 +17,49 @@
 
 package org.apache.rocketmq.proxy.service.sysmessage;
 
-import com.alibaba.fastjson.JSON;
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
+import com.alibaba.fastjson2.JSON;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.rocketmq.client.consumer.DefaultMQPushConsumer;
 import org.apache.rocketmq.client.consumer.listener.MessageListenerConcurrently;
 import org.apache.rocketmq.client.exception.MQClientException;
+import org.apache.rocketmq.client.impl.mqclient.MQClientAPIFactory;
 import org.apache.rocketmq.client.producer.SendStatus;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.common.consumer.ConsumeFromWhere;
 import org.apache.rocketmq.common.message.Message;
 import org.apache.rocketmq.common.message.MessageDecoder;
 import org.apache.rocketmq.common.topic.TopicValidator;
+import org.apache.rocketmq.common.utils.StartAndShutdown;
 import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
+import org.apache.rocketmq.proxy.common.ProxyContext;
 import org.apache.rocketmq.proxy.common.ProxyException;
 import org.apache.rocketmq.proxy.common.ProxyExceptionCode;
-import org.apache.rocketmq.proxy.common.StartAndShutdown;
 import org.apache.rocketmq.proxy.config.ConfigurationManager;
 import org.apache.rocketmq.proxy.config.ProxyConfig;
 import org.apache.rocketmq.proxy.service.admin.AdminService;
-import org.apache.rocketmq.proxy.service.mqclient.MQClientAPIFactory;
 import org.apache.rocketmq.proxy.service.route.AddressableMessageQueue;
 import org.apache.rocketmq.proxy.service.route.TopicRouteService;
 import org.apache.rocketmq.remoting.RPCHook;
 import org.apache.rocketmq.remoting.protocol.header.SendMessageRequestHeader;
 import org.apache.rocketmq.remoting.protocol.heartbeat.MessageModel;
 
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+
 public abstract class AbstractSystemMessageSyncer implements StartAndShutdown, MessageListenerConcurrently {
     protected static final Logger log = LoggerFactory.getLogger(LoggerName.PROXY_LOGGER_NAME);
     protected final TopicRouteService topicRouteService;
     protected final AdminService adminService;
     protected final MQClientAPIFactory mqClientAPIFactory;
+    protected final RPCHook rpcHook;
     protected DefaultMQPushConsumer defaultMQPushConsumer;
 
-    public AbstractSystemMessageSyncer(TopicRouteService topicRouteService, AdminService adminService, MQClientAPIFactory mqClientAPIFactory) {
+    public AbstractSystemMessageSyncer(TopicRouteService topicRouteService, AdminService adminService, MQClientAPIFactory mqClientAPIFactory, RPCHook rpcHook) {
         this.topicRouteService = topicRouteService;
         this.adminService = adminService;
         this.mqClientAPIFactory = mqClientAPIFactory;
+        this.rpcHook = rpcHook;
     }
 
     protected String getSystemMessageProducerId() {
@@ -83,8 +87,8 @@ public abstract class AbstractSystemMessageSyncer implements StartAndShutdown, M
         return 1;
     }
 
-    protected RPCHook getRpcHook() {
-        return null;
+    public RPCHook getRpcHook() {
+        return rpcHook;
     }
 
     protected void sendSystemMessage(Object data) {
@@ -95,7 +99,7 @@ public abstract class AbstractSystemMessageSyncer implements StartAndShutdown, M
                 JSON.toJSONString(data).getBytes(StandardCharsets.UTF_8)
             );
 
-            AddressableMessageQueue messageQueue = this.topicRouteService.getAllMessageQueueView(targetTopic)
+            AddressableMessageQueue messageQueue = this.topicRouteService.getAllMessageQueueView(ProxyContext.createForInner(this.getClass()), targetTopic)
                 .getWriteSelector().selectOne(true);
             this.mqClientAPIFactory.getClient().sendMessageAsync(
                 messageQueue.getBrokerAddr(),
@@ -139,7 +143,7 @@ public abstract class AbstractSystemMessageSyncer implements StartAndShutdown, M
     public void start() throws Exception {
         this.createSysTopic();
         RPCHook rpcHook = this.getRpcHook();
-        this.defaultMQPushConsumer = new DefaultMQPushConsumer(null, this.getSystemMessageConsumerId(), rpcHook);
+        this.defaultMQPushConsumer = new DefaultMQPushConsumer(this.getSystemMessageConsumerId(), rpcHook);
 
         this.defaultMQPushConsumer.setConsumeFromWhere(ConsumeFromWhere.CONSUME_FROM_LAST_OFFSET);
         this.defaultMQPushConsumer.setMessageModel(MessageModel.BROADCASTING);
@@ -153,10 +157,6 @@ public abstract class AbstractSystemMessageSyncer implements StartAndShutdown, M
     }
 
     protected void createSysTopic() {
-        if (this.adminService.topicExist(this.getBroadcastTopicName())) {
-            return;
-        }
-
         String clusterName = this.getBroadcastTopicClusterName();
         if (StringUtils.isEmpty(clusterName)) {
             throw new ProxyException(ProxyExceptionCode.INTERNAL_SERVER_ERROR, "system topic cluster cannot be empty");

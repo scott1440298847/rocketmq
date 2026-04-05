@@ -17,10 +17,26 @@
 
 package org.apache.rocketmq.remoting.protocol.subscription;
 
+import com.alibaba.fastjson2.annotation.JSONField;
 import com.google.common.base.MoreObjects;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import org.apache.commons.lang3.builder.EqualsBuilder;
+import org.apache.commons.lang3.math.NumberUtils;
 import org.apache.rocketmq.common.MixAll;
+import org.apache.rocketmq.common.attribute.LiteSubModel;
+
+import static org.apache.rocketmq.common.SubscriptionGroupAttributes.LITE_SUB_CLIENT_MAX_EVENT_COUNT_ATTRIBUTE;
+import static org.apache.rocketmq.common.SubscriptionGroupAttributes.LITE_SUB_CLIENT_QUOTA_ATTRIBUTE;
+import static org.apache.rocketmq.common.SubscriptionGroupAttributes.LITE_SUB_MODEL_ATTRIBUTE;
+import static org.apache.rocketmq.common.SubscriptionGroupAttributes.LITE_SUB_RESET_OFFSET_EXCLUSIVE_ATTRIBUTE;
+import static org.apache.rocketmq.common.SubscriptionGroupAttributes.LITE_BIND_TOPIC_ATTRIBUTE;
+import static org.apache.rocketmq.common.SubscriptionGroupAttributes.LITE_SUB_RESET_OFFSET_UNSUBSCRIBE_ATTRIBUTE;
+import static org.apache.rocketmq.common.SubscriptionGroupAttributes.LITE_SUB_WILDCARD_ATTRIBUTE;
+
+import static org.apache.rocketmq.common.SubscriptionGroupAttributes.PRIORITY_FACTOR_ATTRIBUTE;
 
 public class SubscriptionGroupConfig {
 
@@ -48,6 +64,8 @@ public class SubscriptionGroupConfig {
     private int consumeTimeoutMinute = 15;
 
     private Set<SimpleSubscriptionData> subscriptionDataSet;
+
+    private Map<String, String> attributes = new HashMap<>();
 
     public String getGroupName() {
         return groupName;
@@ -161,6 +179,91 @@ public class SubscriptionGroupConfig {
         this.subscriptionDataSet = subscriptionDataSet;
     }
 
+    public Map<String, String> getAttributes() {
+        return attributes;
+    }
+
+    public void setAttributes(Map<String, String> attributes) {
+        this.attributes = attributes;
+    }
+
+    @JSONField(serialize = false, deserialize = false)
+    public long getPriorityFactor() {
+        String factorStr = null == attributes ? null : attributes.get(PRIORITY_FACTOR_ATTRIBUTE.getName());
+        return NumberUtils.toLong(factorStr, PRIORITY_FACTOR_ATTRIBUTE.getDefaultValue());
+    }
+
+    @JSONField(serialize = false, deserialize = false)
+    public void setLiteBindTopic(String liteBindTopic) {
+        if (liteBindTopic != null) {
+            attributes.put(LITE_BIND_TOPIC_ATTRIBUTE.getName(), liteBindTopic);
+        }
+    }
+
+    @JSONField(serialize = false, deserialize = false)
+    public String getLiteBindTopic() {
+        return attributes.get(LITE_BIND_TOPIC_ATTRIBUTE.getName());
+    }
+
+    @JSONField(serialize = false, deserialize = false)
+    public int getLiteSubClientQuota() {
+        long quota = LITE_SUB_CLIENT_QUOTA_ATTRIBUTE.getDefaultValue();
+        String quotaStr = attributes.get(LITE_SUB_CLIENT_QUOTA_ATTRIBUTE.getName());
+        if (quotaStr != null) {
+            quota = Long.parseLong(quotaStr);
+        }
+        return Math.toIntExact(quota);
+    }
+
+    @JSONField(serialize = false, deserialize = false)
+    public void setLiteSubExclusive(boolean liteSubExclusive) {
+        if (liteSubExclusive) {
+            attributes.put(LITE_SUB_MODEL_ATTRIBUTE.getName(), LiteSubModel.Exclusive.name());
+        }
+    }
+
+    @JSONField(serialize = false, deserialize = false)
+    public boolean isLiteSubExclusive() {
+        String subLiteModel = attributes.get(LITE_SUB_MODEL_ATTRIBUTE.getName());
+        return Objects.equals(LiteSubModel.Exclusive.name(), subLiteModel);
+    }
+
+    /**
+     * Whether to reset offset in exclusive mode
+     */
+    @JSONField(serialize = false, deserialize = false)
+    public boolean isResetOffsetInExclusiveMode() {
+        String boolStr = attributes.get(LITE_SUB_RESET_OFFSET_EXCLUSIVE_ATTRIBUTE.getName());
+        return Boolean.parseBoolean(boolStr);
+    }
+
+    @JSONField(serialize = false, deserialize = false)
+    public boolean isResetOffsetOnUnsubscribe() {
+        String boolStr = attributes.get(LITE_SUB_RESET_OFFSET_UNSUBSCRIBE_ATTRIBUTE.getName());
+        return Boolean.parseBoolean(boolStr);
+    }
+
+    @JSONField(serialize = false, deserialize = false)
+    public int getMaxClientEventCount() {
+        String content = attributes.get(LITE_SUB_CLIENT_MAX_EVENT_COUNT_ATTRIBUTE.getName());
+        if (content == null) {
+            return -1;
+        }
+        return NumberUtils.toInt(content, -1);
+    }
+
+    @JSONField(serialize = false, deserialize = false)
+    public void setWildcardLiteGroup(boolean wildcard) {
+        if (wildcard) {
+            attributes.put(LITE_SUB_WILDCARD_ATTRIBUTE.getName(), "true");
+        }
+    }
+
+    @JSONField(serialize = false, deserialize = false)
+    public boolean isWildcardLiteGroup() {
+        return attributes.containsKey(LITE_SUB_WILDCARD_ATTRIBUTE.getName());
+    }
+
     @Override
     public int hashCode() {
         final int prime = 31;
@@ -170,6 +273,7 @@ public class SubscriptionGroupConfig {
         result = prime * result + (consumeEnable ? 1231 : 1237);
         result = prime * result + (consumeFromMinEnable ? 1231 : 1237);
         result = prime * result + (notifyConsumerIdsChangedEnable ? 1231 : 1237);
+        result = prime * result + (consumeMessageOrderly ? 1231 : 1237);
         result = prime * result + ((groupName == null) ? 0 : groupName.hashCode());
         result = prime * result + retryMaxTimes;
         result = prime * result + retryQueueNums;
@@ -177,7 +281,8 @@ public class SubscriptionGroupConfig {
             prime * result + (int) (whichBrokerWhenConsumeSlowly ^ (whichBrokerWhenConsumeSlowly >>> 32));
         result = prime * result + groupSysFlag;
         result = prime * result + consumeTimeoutMinute;
-        result = prime * result + subscriptionDataSet.hashCode();
+        result = prime * result + ((subscriptionDataSet == null) ? 0 : subscriptionDataSet.hashCode());
+        result = prime * result + attributes.hashCode();
         return result;
     }
 
@@ -195,6 +300,7 @@ public class SubscriptionGroupConfig {
             .append(consumeEnable, other.consumeEnable)
             .append(consumeFromMinEnable, other.consumeFromMinEnable)
             .append(consumeBroadcastEnable, other.consumeBroadcastEnable)
+            .append(consumeMessageOrderly, other.consumeMessageOrderly)
             .append(retryQueueNums, other.retryQueueNums)
             .append(retryMaxTimes, other.retryMaxTimes)
             .append(whichBrokerWhenConsumeSlowly, other.whichBrokerWhenConsumeSlowly)
@@ -202,6 +308,7 @@ public class SubscriptionGroupConfig {
             .append(groupSysFlag, other.groupSysFlag)
             .append(consumeTimeoutMinute, other.consumeTimeoutMinute)
             .append(subscriptionDataSet, other.subscriptionDataSet)
+            .append(attributes, other.attributes)
             .isEquals();
     }
 
@@ -216,11 +323,13 @@ public class SubscriptionGroupConfig {
             .add("retryQueueNums", retryQueueNums)
             .add("retryMaxTimes", retryMaxTimes)
             .add("groupRetryPolicy", groupRetryPolicy)
+            .add("brokerId", brokerId)
             .add("whichBrokerWhenConsumeSlowly", whichBrokerWhenConsumeSlowly)
             .add("notifyConsumerIdsChangedEnable", notifyConsumerIdsChangedEnable)
             .add("groupSysFlag", groupSysFlag)
             .add("consumeTimeoutMinute", consumeTimeoutMinute)
-            .add("subscriptionTopicSet", subscriptionDataSet)
+            .add("subscriptionDataSet", subscriptionDataSet)
+            .add("attributes", attributes)
             .toString();
     }
 }

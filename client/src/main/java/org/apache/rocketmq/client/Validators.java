@@ -17,13 +17,16 @@
 
 package org.apache.rocketmq.client;
 
+import java.io.File;
 import java.util.Properties;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.rocketmq.client.exception.MQClientException;
 import org.apache.rocketmq.client.producer.DefaultMQProducer;
 import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.common.UtilAll;
 import org.apache.rocketmq.common.constant.PermName;
 import org.apache.rocketmq.common.message.Message;
+import org.apache.rocketmq.common.message.MessageConst;
 import org.apache.rocketmq.common.topic.TopicValidator;
 import org.apache.rocketmq.remoting.protocol.ResponseCode;
 
@@ -35,6 +38,11 @@ import static org.apache.rocketmq.common.topic.TopicValidator.isTopicOrGroupIlle
 public class Validators {
     public static final int CHARACTER_MAX_LENGTH = 255;
     public static final int TOPIC_MAX_LENGTH = 127;
+    /*
+     * Group name max length is 120, for it will be used to make up retry and DLQ topic,
+     * like pull retry: %RETRY%group_topic and pop retry: %RETRY%group_topic.
+     */
+    public static final int GROUP_MAX_LENGTH = 120;
 
     /**
      * Validate group
@@ -44,10 +52,9 @@ public class Validators {
             throw new MQClientException("the specified group is blank", null);
         }
 
-        if (group.length() > CHARACTER_MAX_LENGTH) {
-            throw new MQClientException("the specified group is longer than group max length 255.", null);
+        if (group.length() > GROUP_MAX_LENGTH) {
+            throw new MQClientException(String.format("the specified group[%s] is longer than group max length: %s.", group, GROUP_MAX_LENGTH), null);
         }
-
 
         if (isTopicOrGroupIllegal(group)) {
             throw new MQClientException(String.format(
@@ -76,6 +83,12 @@ public class Validators {
         if (msg.getBody().length > defaultMQProducer.getMaxMessageSize()) {
             throw new MQClientException(ResponseCode.MESSAGE_ILLEGAL,
                 "the message body size over max value, MAX: " + defaultMQProducer.getMaxMessageSize());
+        }
+
+        String lmqPath = msg.getUserProperty(MessageConst.PROPERTY_INNER_MULTI_DISPATCH);
+        if (StringUtils.contains(lmqPath, File.separator)) {
+            throw new MQClientException(ResponseCode.MESSAGE_ILLEGAL,
+                "INNER_MULTI_DISPATCH " + lmqPath + " can not contains " + File.separator + " character");
         }
     }
 
@@ -118,11 +131,10 @@ public class Validators {
     }
 
     public static void checkBrokerConfig(final Properties brokerConfig) throws MQClientException {
-        // TODO: use MixAll.isPropertyValid() when jdk upgrade to 1.8
-        if (brokerConfig.containsKey("brokerPermission")
-            && !PermName.isValid(brokerConfig.getProperty("brokerPermission"))) {
+        String brokerPermission = brokerConfig.getProperty("brokerPermission");
+        if (brokerPermission != null && !PermName.isValid(brokerPermission)) {
             throw new MQClientException(ResponseCode.NO_PERMISSION,
-                String.format("brokerPermission value: %s is invalid.", brokerConfig.getProperty("brokerPermission")));
+                    String.format("brokerPermission value: %s is invalid.", brokerPermission));
         }
     }
 }

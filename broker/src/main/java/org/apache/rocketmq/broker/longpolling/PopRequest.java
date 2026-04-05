@@ -16,31 +16,43 @@
  */
 package org.apache.rocketmq.broker.longpolling;
 
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandlerContext;
 import java.util.Comparator;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
-
-import io.netty.channel.Channel;
+import org.apache.rocketmq.remoting.protocol.heartbeat.SubscriptionData;
+import org.apache.rocketmq.store.MessageFilter;
 
 public class PopRequest {
     private static final AtomicLong COUNTER = new AtomicLong(Long.MIN_VALUE);
 
-    private RemotingCommand remotingCommand;
-    private Channel channel;
-    private long expired;
-    private AtomicBoolean complete = new AtomicBoolean(false);
+    private final RemotingCommand remotingCommand;
+    private final ChannelHandlerContext ctx;
+    private final AtomicBoolean complete = new AtomicBoolean(false);
     private final long op = COUNTER.getAndIncrement();
 
-    public PopRequest(RemotingCommand remotingCommand, Channel channel, long expired) {
-        this.channel = channel;
+    private final long expired;
+    private final SubscriptionData subscriptionData;
+    private final MessageFilter messageFilter;
+
+    public PopRequest(RemotingCommand remotingCommand, ChannelHandlerContext ctx,
+        long expired, SubscriptionData subscriptionData, MessageFilter messageFilter) {
+
+        this.ctx = ctx;
         this.remotingCommand = remotingCommand;
         this.expired = expired;
+        this.subscriptionData = subscriptionData;
+        this.messageFilter = messageFilter;
     }
 
     public Channel getChannel() {
-        return channel;
+        return ctx.channel();
+    }
+
+    public ChannelHandlerContext getCtx() {
+        return ctx;
     }
 
     public RemotingCommand getRemotingCommand() {
@@ -59,11 +71,19 @@ public class PopRequest {
         return expired;
     }
 
+    public SubscriptionData getSubscriptionData() {
+        return subscriptionData;
+    }
+
+    public MessageFilter getMessageFilter() {
+        return messageFilter;
+    }
+
     @Override
     public String toString() {
         final StringBuilder sb = new StringBuilder("PopRequest{");
         sb.append("cmd=").append(remotingCommand);
-        sb.append(", channel=").append(channel);
+        sb.append(", ctx=").append(ctx);
         sb.append(", expired=").append(expired);
         sb.append(", complete=").append(complete);
         sb.append(", op=").append(op);

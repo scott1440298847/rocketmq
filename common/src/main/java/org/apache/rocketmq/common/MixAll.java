@@ -31,9 +31,13 @@ import java.net.NetworkInterface;
 import java.net.SocketException;
 import java.net.URL;
 import java.net.URLConnection;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.NotDirectoryException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.List;
@@ -41,13 +45,16 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 
+import com.google.common.collect.ImmutableSet;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.rocketmq.common.annotation.ImportantField;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.common.help.FAQUrl;
+import org.apache.rocketmq.common.topic.TopicValidator;
 import org.apache.rocketmq.common.utils.IOTinyUtils;
 import org.apache.rocketmq.logging.org.slf4j.Logger;
 import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
@@ -55,6 +62,10 @@ import org.apache.rocketmq.logging.org.slf4j.LoggerFactory;
 public class MixAll {
     public static final String ROCKETMQ_HOME_ENV = "ROCKETMQ_HOME";
     public static final String ROCKETMQ_HOME_PROPERTY = "rocketmq.home.dir";
+    /**
+     * unify the home dir
+     */
+    public static final String ROCKETMQ_HOME_DIR = System.getProperty(ROCKETMQ_HOME_PROPERTY, System.getenv(ROCKETMQ_HOME_ENV));
     public static final String NAMESRV_ADDR_ENV = "NAMESRV_ADDR";
     public static final String NAMESRV_ADDR_PROPERTY = "rocketmq.namesrv.addr";
     public static final String MESSAGE_COMPRESS_TYPE = "rocketmq.message.compressType";
@@ -76,6 +87,8 @@ public class MixAll {
     public static final String CID_ONSAPI_OWNER_GROUP = "CID_ONSAPI_OWNER";
     public static final String CID_ONSAPI_PULL_GROUP = "CID_ONSAPI_PULL";
     public static final String CID_RMQ_SYS_PREFIX = "CID_RMQ_SYS_";
+    public static final String IS_SUPPORT_HEART_BEAT_V2 = "IS_SUPPORT_HEART_BEAT_V2";
+    public static final String IS_SUB_CHANGE = "IS_SUB_CHANGE";
     public static final List<String> LOCAL_INET_ADDRESS = getLocalInetAddress();
     public static final String LOCALHOST = localhost();
     public static final String DEFAULT_CHARSET = "UTF-8";
@@ -97,7 +110,8 @@ public class MixAll {
     public static final String ACL_CONF_TOOLS_FILE = "/conf/tools.yml";
     public static final String REPLY_MESSAGE_FLAG = "reply";
     public static final String LMQ_PREFIX = "%LMQ%";
-    public static final String MULTI_DISPATCH_QUEUE_SPLITTER = ",";
+    public static final int LMQ_QUEUE_ID = 0;
+    public static final String LMQ_DISPATCH_SEPARATOR = ",";
     public static final String REQ_T = "ReqT";
     public static final String ROCKETMQ_ZONE_ENV = "ROCKETMQ_ZONE";
     public static final String ROCKETMQ_ZONE_PROPERTY = "rocketmq.zone";
@@ -105,6 +119,8 @@ public class MixAll {
     public static final String ROCKETMQ_ZONE_MODE_PROPERTY = "rocketmq.zone.mode";
     public static final String ZONE_NAME = "__ZONE_NAME";
     public static final String ZONE_MODE = "__ZONE_MODE";
+    public final static String RPC_REQUEST_HEADER_NAMESPACED_FIELD = "nsd";
+    public final static String RPC_REQUEST_HEADER_NAMESPACE_FIELD = "ns";
 
     private static final Logger log = LoggerFactory.getLogger(LoggerName.COMMON_LOGGER_NAME);
     public static final String LOGICAL_QUEUE_MOCK_BROKER_PREFIX = "__syslo__";
@@ -113,23 +129,41 @@ public class MixAll {
     public static final String MULTI_PATH_SPLITTER = System.getProperty("rocketmq.broker.multiPathSplitter", ",");
 
     private static final String OS = System.getProperty("os.name").toLowerCase();
+    public static final long MILLS_FOR_HOUR = TimeUnit.HOURS.toMillis(1);
+
+    private static final Set<String> PREDEFINE_GROUP_SET = ImmutableSet.of(
+        DEFAULT_CONSUMER_GROUP,
+        DEFAULT_PRODUCER_GROUP,
+        TOOLS_CONSUMER_GROUP,
+        SCHEDULE_CONSUMER_GROUP,
+        FILTERSRV_CONSUMER_GROUP,
+        MONITOR_CONSUMER_GROUP,
+        CLIENT_INNER_PRODUCER_GROUP,
+        SELF_TEST_PRODUCER_GROUP,
+        SELF_TEST_CONSUMER_GROUP,
+        ONS_HTTP_PROXY_GROUP,
+        CID_ONSAPI_PERMISSION_GROUP,
+        CID_ONSAPI_OWNER_GROUP,
+        CID_ONSAPI_PULL_GROUP,
+        CID_SYS_RMQ_TRANS
+    );
 
     public static boolean isWindows() {
-        return OS.indexOf("win") >= 0;
+        return OS.contains("win");
     }
 
     public static boolean isMac() {
-        return OS.indexOf("mac") >= 0;
+        return OS.contains("mac");
     }
 
     public static boolean isUnix() {
-        return OS.indexOf("nix") >= 0
-                || OS.indexOf("nux") >= 0
-                || OS.indexOf("aix") > 0;
+        return OS.contains("nix")
+            || OS.contains("nux")
+            || OS.contains("aix");
     }
 
     public static boolean isSolaris() {
-        return OS.indexOf("sunos") >= 0;
+        return OS.contains("sunos");
     }
 
     public static String getWSAddr() {
@@ -152,6 +186,14 @@ public class MixAll {
 
     public static boolean isSysConsumerGroup(final String consumerGroup) {
         return consumerGroup.startsWith(CID_RMQ_SYS_PREFIX);
+    }
+
+    public static boolean isSysConsumerGroupAndEnableCreate(final String consumerGroup, final boolean isEnableCreateSysGroup) {
+        return isEnableCreateSysGroup && isSysConsumerGroup(consumerGroup);
+    }
+
+    public static boolean isPredefinedGroup(final String consumerGroup) {
+        return PREDEFINE_GROUP_SET.contains(consumerGroup);
     }
 
     public static String getDLQTopic(final String consumerGroup) {
@@ -200,7 +242,19 @@ public class MixAll {
         if (fileParent != null) {
             fileParent.mkdirs();
         }
-        IOTinyUtils.writeStringToFile(file, str, "UTF-8");
+        IOTinyUtils.writeStringToFile(file, str, DEFAULT_CHARSET);
+    }
+
+    public static synchronized void fsyncDirectory(Path dir) throws IOException {
+        if (!Files.isDirectory(dir)) {
+            throw new NotDirectoryException(dir.toString());
+        }
+        if (isWindows()) {
+            return;
+        }
+        try (FileChannel fc = FileChannel.open(dir, StandardOpenOption.READ)) {
+            fc.force(true);
+        }
     }
 
     public static String file2String(final String fileName) throws IOException {
@@ -219,7 +273,7 @@ public class MixAll {
             }
 
             if (result) {
-                return new String(data, "UTF-8");
+                return new String(data, DEFAULT_CHARSET);
             }
         }
         return null;
@@ -359,9 +413,9 @@ public class MixAll {
                     String property = p.getProperty(key);
                     if (property != null) {
                         Class<?>[] pt = method.getParameterTypes();
-                        if (pt != null && pt.length > 0) {
+                        if (pt.length > 0) {
                             String cn = pt[0].getSimpleName();
-                            Object arg = null;
+                            Object arg;
                             if (cn.equals("int") || cn.equals("Integer")) {
                                 arg = Integer.parseInt(property);
                             } else if (cn.equals("long") || cn.equals("Long")) {
@@ -373,6 +427,7 @@ public class MixAll {
                             } else if (cn.equals("float") || cn.equals("Float")) {
                                 arg = Float.parseFloat(property);
                             } else if (cn.equals("String")) {
+                                property = property.trim();
                                 arg = property;
                             } else {
                                 continue;
@@ -457,7 +512,9 @@ public class MixAll {
         if (!candidatesHost.isEmpty()) {
             return candidatesHost.get(0);
         }
-        return null;
+
+        // Fallback to loopback
+        return localhost();
     }
 
     public static boolean compareAndIncreaseOnly(final AtomicLong target, final long value) {
@@ -489,6 +546,7 @@ public class MixAll {
     public static int compareLong(long x, long y) {
         return Long.compare(x, y);
     }
+
     public static boolean isLmq(String lmqMetaData) {
         return lmqMetaData != null && lmqMetaData.startsWith(LMQ_PREFIX);
     }
@@ -498,4 +556,92 @@ public class MixAll {
         return path.normalize().toString();
     }
 
+    public static boolean isSysConsumerGroupPullMessage(String consumerGroup) {
+        if (DEFAULT_CONSUMER_GROUP.equals(consumerGroup)
+            || TOOLS_CONSUMER_GROUP.equals(consumerGroup)
+            || SCHEDULE_CONSUMER_GROUP.equals(consumerGroup)
+            || FILTERSRV_CONSUMER_GROUP.equals(consumerGroup)
+            || MONITOR_CONSUMER_GROUP.equals(consumerGroup)
+            || SELF_TEST_CONSUMER_GROUP.equals(consumerGroup)
+            || ONS_HTTP_PROXY_GROUP.equals(consumerGroup)
+            || CID_ONSAPI_PERMISSION_GROUP.equals(consumerGroup)
+            || CID_ONSAPI_OWNER_GROUP.equals(consumerGroup)
+            || CID_ONSAPI_PULL_GROUP.equals(consumerGroup)
+            || CID_SYS_RMQ_TRANS.equals(consumerGroup)
+            || consumerGroup.startsWith(CID_RMQ_SYS_PREFIX)) {
+            return true;
+        }
+        return false;
+    }
+
+    public static boolean topicAllowsLMQ(String topic) {
+        return !topic.startsWith(MixAll.RETRY_GROUP_TOPIC_PREFIX)
+            && !topic.startsWith(MixAll.DLQ_GROUP_TOPIC_PREFIX)
+            && !topic.startsWith(TopicValidator.SYSTEM_TOPIC_PREFIX)
+            && !topic.equals(TopicValidator.RMQ_SYS_SCHEDULE_TOPIC);
+    }
+
+    public static String adjustConfigForPlatform(String config) {
+        if (StringUtils.isNotBlank(config)) {
+            if (isWindows()) {
+                config = StringUtils.replace(config, "\\", "\\\\");
+            }
+        }
+        return config;
+    }
+
+    public static long dealTimeToHourStamps(long timeStamp) {
+        if (timeStamp <= 0L) {
+            return timeStamp;
+        }
+        return (timeStamp / MILLS_FOR_HOUR) * MILLS_FOR_HOUR;
+    }
+
+    public static boolean isHourTime(Long timeStamp) {
+        if (null == timeStamp) {
+            return false;
+        }
+        if (timeStamp <= 0L) {
+            return false;
+        }
+        return timeStamp % MILLS_FOR_HOUR == 0;
+    }
+
+    public static List<Long> getHours(long startTimeMillis, long endTimeMillis) {
+        if (startTimeMillis > endTimeMillis || startTimeMillis <= 0L || endTimeMillis <= 0L) {
+            return null;
+        }
+        List<Long> result = new ArrayList<>();
+        long startHour = dealTimeToHourStamps(startTimeMillis);
+        long endHour = dealTimeToHourStamps(endTimeMillis);
+        long current = startHour;
+        while (current <= endHour) {
+            result.add(current);
+            //protect system self 30 * 24
+            if (result.size() >= 720) {
+                return result;
+            }
+            current += MILLS_FOR_HOUR;
+        }
+        return result;
+    }
+
+    public static boolean isByteArrayEqual(byte[] array1, int offset1, int length1, byte[] array2, int offset2, int length2) {
+        if (null == array1 || null == array2) {
+            return false;
+        }
+        if (length1 != length2) {
+            return false;
+        }
+        if (offset1 < 0 || offset1 + length1 > array1.length ||
+            offset2 < 0 || offset2 + length2 > array2.length) {
+            throw new ArrayIndexOutOfBoundsException("Invalid array index");
+        }
+        for (int i = 0; i < length1; i++) {
+            if (array1[offset1 + i] != array2[offset2 + i]) {
+                return false;
+            }
+        }
+        return true;
+    }
 }
